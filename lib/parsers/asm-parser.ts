@@ -67,6 +67,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
     relocationRe: RegExp;
     relocDataSymNameRe: RegExp;
     lineRe: RegExp;
+    lccLineCommentRe: RegExp;
     labelRe: RegExp;
     destRe: RegExp;
     commentRe: RegExp;
@@ -76,6 +77,8 @@ export class AsmParser extends AsmRegex implements IAsmParser {
     sourceTag: RegExp;
     sourceD2Tag: RegExp;
     sourceCVTag: RegExp;
+    sourceLccTag: RegExp;
+    sourceLccOldTag: RegExp;
     source6502Dbg: RegExp;
     source6502DbgEnd: RegExp;
     sourceStab: RegExp;
@@ -130,22 +133,25 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         } else {
             this.lineRe = /^(\/[^:]+):(?<line>\d+).*/;
         }
+        this.lccLineCommentRe = /(\s+!.*)$/;
 
         // labelRe is made very greedy as it's also used with demangled objdump
         // output (eg. it can have c++ template with <>).
         this.labelRe = /^([\da-f]+)\s+<(.+)>:$/;
         this.destRe = /\s([\da-f]+)\s+<([^+>]+)(\+0x[\da-f]+)?>$/;
-        this.commentRe = /[#;]/;
+        this.commentRe = /[#;!]/;
         this.instOpcodeRe = /(\.inst\.?\w?)\s*(.*)/;
 
         // Lines matching the following pattern are considered comments:
-        // - starts with '#', '@', '//' or a single ';' (non repeated)
+        // - starts with '!', '#', '@', '//' or a single ';' (non repeated)
         // - starts with ';;' and the first non-whitespace before end of line is not #
-        this.commentOnly = /^\s*(((#|@|\/\/).*)|(\/\*.*\*\/)|(;\s*)|(;[^;].*)|(;;\s*[^\s#].*))$/;
+        this.commentOnly = /^\s*(((!|#|@|\/\/).*)|(\/\*.*\*\/)|(;\s*)|(;[^;].*)|(;;\s*[^\s#].*))$/;
         this.commentOnlyNvcc = /^\s*(((#|;|\/\/).*)|(\/\*.*\*\/))$/;
         this.sourceTag = /^\s*\.loc\s+(\d+)\s+(\d+)\s+(.*)/;
         this.sourceD2Tag = /^\s*\.d2line\s+(\d+),?\s*(\d*).*/;
         this.sourceCVTag = /^\s*\.cv_loc\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+).*/;
+        this.sourceLccTag = /!\s+(.+)\s+:\s+(\d+)/;
+        this.sourceLccOldTag = /!.*line=(\d+)$/;
         this.source6502Dbg = /^\s*\.dbg\s+line,\s*"([^"]+)",\s*(\d+)/;
         this.source6502DbgEnd = /^\s*\.dbg\s+line[^,]/;
         this.sourceStab = /^\s*\.stabn\s+(\d+),0,(\d+),.*/;
@@ -473,6 +479,29 @@ export class AsmParser extends AsmRegex implements IAsmParser {
             }
         };
 
+        const handleLcc = line => {
+            const match = line.match(this.sourceLccTag);
+            if (match) {
+                const file = match[1];
+                const sourceLine = parseInt(match[2]);
+                source = {
+                    file: this.stdInLooking.test(file) ? null : file,
+                    line: sourceLine,
+                };
+                return true;
+            } else {
+                const matchold = line.match(this.sourceLccOldTag);
+                if (matchold) {
+                    source = {
+                        file: null,
+                        line: parseInt(match[1]),
+                    };
+                    return true;
+                }
+            }
+            return false;
+        };
+
         let inNvccDef = false;
         let inNvccCode = false;
 
@@ -495,6 +524,10 @@ export class AsmParser extends AsmRegex implements IAsmParser {
             handleSource(line);
             handleStabs(line);
             handle6502(line);
+
+            if (handleLcc(line) && filters.commentOnly) {
+                line = line.split(this.lccLineCommentRe, 1)[0];
+            }
 
             if (source && (source.file === null || source.mainsource)) {
                 lastOwnSource = source;
