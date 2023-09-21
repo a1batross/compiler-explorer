@@ -38,9 +38,9 @@ import {CompilerInfo} from '../../types/compiler.interfaces.js';
 import {CompilationResult} from '../../types/compilation/compilation.interfaces.js';
 import {ResultLine} from '../../types/resultline/resultline.interfaces.js';
 import {assert} from '../assert.js';
-import {AssemblyDocumentationInstructionSet} from '../../types/features/assembly-documentation.interfaces';
 import {Alert} from '../widgets/alert';
 import {Compiler} from './compiler';
+import {InstructionSet} from '../instructionsets.js';
 
 export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, DeviceAsmState> {
     private decorations: Record<string, monaco.editor.IModelDeltaDecoration[]>;
@@ -98,6 +98,10 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
                 lineNumbersMinChars: 3,
             }),
         );
+    }
+
+    override getPrintName() {
+        return 'Device Output';
     }
 
     override registerOpeningAnalyticsEvent(): void {
@@ -172,7 +176,7 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
         try {
             const asmHelp = await Compiler.getAsmInfo(
                 word.word,
-                this.selectedDevice.split(' ')[0].toLowerCase() as AssemblyDocumentationInstructionSet,
+                this.selectedDevice.split(' ')[0].toLowerCase() as InstructionSet,
             );
             if (asmHelp) {
                 this.alertSystem.alert(opcode + ' help', asmHelp.html + appendInfo(asmHelp.url), {
@@ -254,8 +258,9 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
     override onCompileResult(id: number, compiler: CompilerInfo, result: CompilationResult): void {
         if (this.compilerInfo.compilerId !== id) return;
 
-        // @ts-expect-error: CompilationResult does not have the 'devices' type
-        this.onDevices(result.devices);
+        if (result.devices) {
+            this.onDevices(result.devices);
+        }
     }
 
     makeDeviceSelector(deviceNames: string[]): void {
@@ -346,7 +351,7 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
 
     override onCompiler(
         id: number,
-        compiler: CompilerInfo | undefined,
+        compiler: CompilerInfo | null,
         options: string,
         editorId: number,
         treeId: number,
@@ -435,7 +440,7 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
                 try {
                     const response = await Compiler.getAsmInfo(
                         currentWord.word,
-                        this.selectedDevice.split(' ')[0].toLowerCase() as AssemblyDocumentationInstructionSet,
+                        this.selectedDevice.split(' ')[0].toLowerCase() as InstructionSet,
                     );
                     if (!response) return;
                     this.decorations.asmToolTip = [

@@ -22,14 +22,16 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+import {InstructionSet} from '../types/instructionsets.js';
+
 type InstructionSetMethod = {
     target: string[];
     path: string[];
 };
 
 export class InstructionSets {
-    private defaultInstructionset = 'amd64';
-    private supported: Record<string, InstructionSetMethod> = {};
+    private defaultInstructionset: InstructionSet = 'amd64';
+    private supported: Record<InstructionSet, InstructionSetMethod>;
 
     constructor() {
         this.supported = {
@@ -47,10 +49,10 @@ export class InstructionSets {
             },
             c6x: {
                 target: ['c6x'],
-                path: ['/c6x-'],
+                path: ['/tic6x-'],
             },
             ebpf: {
-                target: ['ebpf'],
+                target: ['bpf'],
                 path: ['/bpf-'],
             },
             kvx: {
@@ -61,9 +63,13 @@ export class InstructionSets {
                 target: ['loongarch'],
                 path: ['/loongarch64-'],
             },
+            m68k: {
+                target: ['m68k'],
+                path: ['/m68k-'],
+            },
             mips: {
                 target: ['mips'],
-                path: ['/mips', '/mipsel-', '/mips64el-', '/mips64-'],
+                path: ['/mips', '/mipsel-', '/mips64el-', '/mips64-', '/nanomips-'],
             },
             mrisc32: {
                 target: ['mrisc32'],
@@ -85,7 +91,7 @@ export class InstructionSets {
                 target: ['rv32'],
                 path: ['/riscv32-'],
             },
-            sh : {
+            sh: {
                 target: ['sh'],
                 path: ['/sh-'],
             },
@@ -109,7 +115,7 @@ export class InstructionSets {
                 target: ['wasm64'],
                 path: [],
             },
-            xstensa: {
+            xtensa: {
                 target: ['xtensa'],
                 path: ['/xtensa-'],
             },
@@ -121,14 +127,60 @@ export class InstructionSets {
                 target: [],
                 path: [],
             },
+            java: {
+                target: [],
+                path: [],
+            },
+            llvm: {
+                target: [],
+                path: [],
+            },
+            python: {
+                target: [],
+                path: [],
+            },
+            ptx: {
+                target: [],
+                path: [],
+            },
+            amd64: {
+                target: [],
+                path: [],
+            },
+            evm: {
+                target: [],
+                path: [],
+            },
+            mos6502: {
+                target: [],
+                path: [],
+            },
+            sass: {
+                target: [],
+                path: [],
+            },
+            beam: {
+                target: [],
+                path: [],
+            },
+            hook: {
+                target: [],
+                path: [],
+            },
+            spirv: {
+                target: [],
+                path: [],
+            },
         };
     }
 
-    async getCompilerInstructionSetHint(compilerArch: string | boolean, exe: string): Promise<string> {
+    async getCompilerInstructionSetHint(compilerArch: string | boolean, exe: string): Promise<InstructionSet> {
         return new Promise(resolve => {
             if (compilerArch && typeof compilerArch === 'string') {
-                for (const instructionSet in this.supported) {
-                    const method = this.supported[instructionSet];
+                for (const [instructionSet, method] of Object.entries(this.supported) as [
+                    InstructionSet,
+                    InstructionSetMethod,
+                ][]) {
                     for (const target of method.target) {
                         if (compilerArch.includes(target)) {
                             resolve(instructionSet);
@@ -137,8 +189,10 @@ export class InstructionSets {
                     }
                 }
             } else {
-                for (const instructionSet in this.supported) {
-                    const method = this.supported[instructionSet];
+                for (const [instructionSet, method] of Object.entries(this.supported) as [
+                    InstructionSet,
+                    InstructionSetMethod,
+                ][]) {
                     for (const path of method.path) {
                         if (exe.includes(path)) {
                             resolve(instructionSet);

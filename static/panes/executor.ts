@@ -59,6 +59,7 @@ import {SourceAndFiles} from '../download-service.js';
 import {ICompilerShared} from '../compiler-shared.interfaces.js';
 import {CompilerShared} from '../compiler-shared.js';
 import {LangInfo} from './compiler-request.interfaces.js';
+import {escapeHTML} from '../../shared/common-utils.js';
 
 const languages = options.languages;
 
@@ -262,8 +263,7 @@ export class Executor extends Pane<ExecutorState> {
     }
 
     private errorResult(message: string): CompilationResult {
-        // @ts-expect-error: This is a valid CompilationResult
-        return {stdout: [], timedOut: false, code: -1, stderr: message};
+        return {stdout: [], timedOut: false, code: -1, stderr: [{text: message}]};
     }
 
     compile(bypassCache?: BypassCache): void {
@@ -456,41 +456,26 @@ export class Executor extends Pane<ExecutorState> {
     ): void {
         const elem = $('<div/>').appendTo(container);
         if (addLineLinks && lineNum) {
-            elem.html(
-                // @ts-expect-error: JQuery types are wrong
-                $('<span class="linked-compiler-output-line"></span>')
-                    .html(msg)
-                    .on('click', e => {
-                        const editorId = this.getEditorIdByFilename(filename ?? '');
-                        if (editorId) {
-                            this.eventHub.emit(
-                                'editorLinkLine',
-                                editorId,
-                                lineNum,
-                                column ?? 0,
-                                (column ?? 0) + 1,
-                                true,
-                            );
-                        }
-                        // do not bring user to the top of index.html
-                        // http://stackoverflow.com/questions/3252730
-                        e.preventDefault();
-                        return false;
-                    })
-                    .on('mouseover', () => {
-                        const editorId = this.getEditorIdByFilename(filename ?? '');
-                        if (editorId) {
-                            this.eventHub.emit(
-                                'editorLinkLine',
-                                editorId,
-                                lineNum,
-                                column ?? 0,
-                                (column ?? 0) + 1,
-                                false,
-                            );
-                        }
-                    }),
-            );
+            elem.empty();
+            $('<span class="linked-compiler-output-line"></span>')
+                .html(msg)
+                .on('click', e => {
+                    const editorId = this.getEditorIdByFilename(filename ?? '');
+                    if (editorId) {
+                        this.eventHub.emit('editorLinkLine', editorId, lineNum, column ?? 0, (column ?? 0) + 1, true);
+                    }
+                    // do not bring user to the top of index.html
+                    // http://stackoverflow.com/questions/3252730
+                    e.preventDefault();
+                    return false;
+                })
+                .on('mouseover', () => {
+                    const editorId = this.getEditorIdByFilename(filename ?? '');
+                    if (editorId) {
+                        this.eventHub.emit('editorLinkLine', editorId, lineNum, column ?? 0, (column ?? 0) + 1, false);
+                    }
+                })
+                .appendTo(elem);
         } else {
             elem.html(msg);
         }
@@ -710,8 +695,7 @@ export class Executor extends Pane<ExecutorState> {
 
     resendResult(): boolean {
         if (!$.isEmptyObject(this.lastResult)) {
-            // @ts-expect-error: 'executeResult' may accept only 4 arguments
-            this.eventHub.emit('executeResult', this.id, this.compiler, this.lastResult);
+            this.eventHub.emit('executeResult', this.id, this.compiler, this.lastResult, languages[this.currentLangId]);
             return true;
         }
         return false;
@@ -769,16 +753,14 @@ export class Executor extends Pane<ExecutorState> {
             const target = $(e.target);
             if (
                 !target.is(this.prependOptions) &&
-                // @ts-expect-error: JQuery types are wrong
-                this.prependOptions.has(target).length === 0 &&
+                this.prependOptions.has(target as any).length === 0 &&
                 target.closest('.popover').length === 0
             )
                 this.prependOptions.popover('hide');
 
             if (
                 !target.is(this.fullCompilerName) &&
-                // @ts-expect-error: JQuery types are wrong
-                this.fullCompilerName.has(target).length === 0 &&
+                this.fullCompilerName.has(target as any).length === 0 &&
                 target.closest('.popover').length === 0
             )
                 this.fullCompilerName.popover('hide');
@@ -867,7 +849,7 @@ export class Executor extends Pane<ExecutorState> {
     }
 
     initListeners(): void {
-        // this.filters.on('change', _.bind(this.onFilterChange, this));
+        // this.filters.on('change', this.onFilterChange.bind(this));
         this.fontScale.on('change', this.onFontScale.bind(this));
         this.paneRenaming.on('renamePane', this.updateState.bind(this));
         this.toggleWrapButton.on('change', this.onToggleWrapChange.bind(this));
@@ -970,8 +952,7 @@ export class Executor extends Pane<ExecutorState> {
         $(document).on('click', e => {
             const elem = this.libsButton;
             const target = $(e.target);
-            // @ts-expect-error: JQuery types are again wrong
-            if (!target.is(elem) && elem.has(target).length === 0 && target.closest('.popover').length === 0) {
+            if (!target.is(elem) && elem.has(target as any).length === 0 && target.closest('.popover').length === 0) {
                 elem.popover('hide');
             }
         });
@@ -980,7 +961,7 @@ export class Executor extends Pane<ExecutorState> {
 
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (MutationObserver !== undefined) {
-            new MutationObserver(_.bind(this.resize, this)).observe(this.execStdinField[0], {
+            new MutationObserver(this.resize.bind(this)).observe(this.execStdinField[0], {
                 attributes: true,
                 attributeFilter: ['style'],
             });
@@ -1070,8 +1051,8 @@ export class Executor extends Pane<ExecutorState> {
             this.id,
             this.compiler,
             this.options,
-            this.sourceEditorId ?? false,
-            this.sourceTreeId ?? false,
+            this.sourceEditorId ?? -1,
+            this.sourceTreeId ?? -1,
         );
     }
 
@@ -1142,7 +1123,7 @@ export class Executor extends Pane<ExecutorState> {
 
     override updateTitle(): void {
         const name = this.paneName ? this.paneName : this.getPaneName();
-        this.container.setTitle(_.escape(name));
+        this.container.setTitle(escapeHTML(name));
     }
 
     updateCompilerName() {
@@ -1178,11 +1159,11 @@ export class Executor extends Pane<ExecutorState> {
         // `notification` contains HTML from a config file, so is 'safe'.
         // `version` comes from compiler output, so isn't, and is escaped.
         const bodyContent = $('<div>');
-        const versionContent = $('<div>').html(_.escape(version?.version ?? ''));
+        const versionContent = $('<div>').html(escapeHTML(version?.version ?? ''));
         bodyContent.append(versionContent);
         if (version?.fullVersion) {
             const hiddenSection = $('<div>');
-            const hiddenVersionText = $('<div>').html(_.escape(version.fullVersion)).hide();
+            const hiddenVersionText = $('<div>').html(escapeHTML(version.fullVersion)).hide();
             const clickToExpandContent = $('<a>')
                 .attr('href', 'javascript:;')
                 .text('Toggle full version output')

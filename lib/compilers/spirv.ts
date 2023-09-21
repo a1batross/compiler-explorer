@@ -121,7 +121,7 @@ export class SPIRVCompiler extends BaseCompiler {
         compiler: string,
         options: string[],
         inputFilename: string,
-        execOptions: ExecutionOptions,
+        execOptions: ExecutionOptions & {env: Record<string, string>},
     ) {
         const sourceDir = path.dirname(inputFilename);
         const bitcodeFilename = path.join(sourceDir, this.outputFilebase + '.bc');
@@ -169,7 +169,7 @@ export class SPIRVCompiler extends BaseCompiler {
         compiler: string,
         options: any[],
         inputFilename: string,
-        execOptions: ExecutionOptions,
+        execOptions: ExecutionOptions & {env: Record<string, string>},
     ) {
         if (!execOptions) {
             execOptions = this.getDefaultExecOptions();
@@ -206,6 +206,7 @@ export class SPIRVCompiler extends BaseCompiler {
         inputFilename: string,
         options: string[],
         irOptions: LLVMIrBackendOptions,
+        produceCfg: boolean,
         filters: ParseFiltersAndOutputOptions,
     ) {
         const newOptions = _.filter(options, option => option !== '-fcolor-diagnostics').concat('-emit-llvm');
@@ -221,9 +222,13 @@ export class SPIRVCompiler extends BaseCompiler {
         );
         if (output.code !== 0) {
             logger.error('Failed to run compiler to get IR code');
-            return output.stderr;
+            return {
+                asm: output.stderr,
+            };
         }
         const ir = await this.processIrOutput(output, irOptions, filters);
-        return ir.asm;
+        return {
+            asm: ir.asm,
+        };
     }
 }

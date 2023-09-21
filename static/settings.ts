@@ -25,15 +25,15 @@
 import $ from 'jquery';
 import {options} from './options.js';
 import * as colour from './colour.js';
-import * as local from './local.js';
 import {themes, Themes} from './themes.js';
 import {AppTheme, ColourScheme, ColourSchemeInfo} from './colour.js';
 import {Hub} from './hub.js';
 import {EventHub} from './event-hub.js';
-import {keys, isString} from '../lib/common-utils.js';
+import {keys, isString} from '../shared/common-utils.js';
 import {assert, unwrapString} from './assert.js';
 
 import {LanguageKey} from '../types/languages.interfaces.js';
+import {localStorage} from './local.js';
 
 export type FormatBase = 'Google' | 'LLVM' | 'Mozilla' | 'Chromium' | 'WebKit' | 'Microsoft' | 'GNU';
 
@@ -79,7 +79,10 @@ export interface SiteSettings {
 }
 
 class BaseSetting {
-    constructor(public elem: JQuery, public name: string) {}
+    constructor(
+        public elem: JQuery,
+        public name: string,
+    ) {}
 
     // Can be undefined if the element doesn't exist which is the case in embed mode
     protected val(): string | number | string[] | undefined {
@@ -222,12 +225,14 @@ export class Settings {
         this.addNumerics();
         this.addTextBoxes();
 
+        // The color scheme dropdown needs to be populated otherwise the .val won't stick and it'll default
+        this.fillColourSchemeSelector(this.root.find('.colourScheme'), this.settings.theme);
         this.setSettings(this.settings);
         this.handleThemes();
     }
 
     public static getStoredSettings(): SiteSettings {
-        return JSON.parse(local.get('settings', '{}'));
+        return JSON.parse(localStorage.get('settings', '{}'));
     }
 
     public setSettings(newSettings: SiteSettings) {
@@ -333,6 +338,7 @@ export class Settings {
         const defaultLanguageData = Object.keys(langs).map(lang => {
             return {label: langs[lang].id, desc: langs[lang].name};
         });
+        defaultLanguageData.sort((a, b) => a.desc.localeCompare(b.desc));
         addSelector('.defaultLanguage', 'defaultLanguage', defaultLanguageData, defLang as LanguageKey);
 
         if (this.subLangId) {
@@ -430,17 +436,17 @@ export class Settings {
         this.onThemeChange();
     }
 
-    private fillColourSchemeSelector(colourSchemeSelect: JQuery, newTheme?: AppTheme) {
+    private fillColourSchemeSelector(colourSchemeSelect: JQuery, theme?: AppTheme) {
         colourSchemeSelect.empty();
-        if (newTheme === 'system') {
+        if (theme === 'system') {
             if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-                newTheme = themes.dark.id;
+                theme = themes.dark.id;
             } else {
-                newTheme = themes.default.id;
+                theme = themes.default.id;
             }
         }
         for (const scheme of colour.schemes) {
-            if (this.isSchemeUsable(scheme, newTheme)) {
+            if (this.isSchemeUsable(scheme, theme)) {
                 colourSchemeSelect.append($(`<option value="${scheme.name}">${scheme.desc}</option>`));
             }
         }

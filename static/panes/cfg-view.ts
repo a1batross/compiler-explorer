@@ -45,6 +45,9 @@ import {GraphLayoutCore} from '../graph-layout-core.js';
 import * as MonacoConfig from '../monaco-config.js';
 import TomSelect from 'tom-select';
 import {assert, unwrap} from '../assert.js';
+import {CompilationResult} from '../compilation/compilation.interfaces.js';
+import {CompilerInfo} from '../compiler.interfaces.js';
+import {escapeHTML} from '../../shared/common-utils.js';
 
 const ColorTable = {
     red: '#FE5D5D',
@@ -62,16 +65,6 @@ const DZOOM = 0.1;
 const MINZOOM = 0.1;
 
 const EST_COMPRESSION_RATIO = 0.022;
-
-// https://stackoverflow.com/questions/6234773/can-i-escape-html-special-chars-in-javascript
-function escapeSVG(text: string) {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
 
 function attrs(attributes: Record<string, string | number | null>) {
     return Object.entries(attributes)
@@ -135,6 +128,7 @@ export class Cfg extends Pane<CfgState> {
     zoom = 1;
     // Ugly but I don't see another way
     firstRender = true;
+    contentsAreIr = false;
 
     constructor(hub: Hub, container: Container, state: CfgState & PaneState) {
         if ((state as any).selectedFn) {
@@ -147,13 +141,14 @@ export class Cfg extends Pane<CfgState> {
             };
         }
         super(hub, container, state);
-        this.eventHub.emit('cfgViewOpened', this.compilerInfo.compilerId);
-        this.eventHub.emit('requestFilters', this.compilerInfo.compilerId);
-        this.eventHub.emit('requestCompiler', this.compilerInfo.compilerId);
         this.state = state;
+        this.eventHub.emit('cfgViewOpened', this.compilerInfo.compilerId, this.state.isircfg === true);
+        this.eventHub.emit('requestCompiler', this.compilerInfo.compilerId);
+        this.contentsAreIr = !!this.state.isircfg;
         // This is a workaround for a chrome render bug that's existed since at least 2013
         // https://github.com/compiler-explorer/compiler-explorer/issues/4421
         this.extraTransforms = navigator.userAgent.includes('AppleWebKit') ? ' translateZ(0)' : '';
+        this.updateTitle();
     }
 
     override getInitialHTML() {
@@ -161,7 +156,14 @@ export class Cfg extends Pane<CfgState> {
     }
 
     override getDefaultPaneName() {
-        return 'CFG';
+        // We need to check if this.state exists because this is called in the super constructor before this is actually
+        // constructed
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (this.state && this.state.isircfg) {
+            return `IR CFG`;
+        } else {
+            return `CFG`;
+        }
     }
 
     override registerButtons() {
@@ -297,7 +299,13 @@ export class Cfg extends Pane<CfgState> {
         fileSaver.saveAs(new Blob([this.createSVG()], {type: 'text/plain;charset=utf-8'}), 'cfg.svg');
     }
 
-    override onCompiler(compilerId: number, compiler: any, options: unknown, editorId: number, treeId: number): void {
+    override onCompiler(
+        compilerId: number,
+        compiler: CompilerInfo | null,
+        options: string,
+        editorId: number,
+        treeId: number,
+    ): void {
         if (this.compilerInfo.compilerId !== compilerId) return;
         this.compilerInfo.compilerName = compiler ? compiler.name : '';
         this.compilerInfo.editorId = editorId;
@@ -308,13 +316,14 @@ export class Cfg extends Pane<CfgState> {
         }
     }
 
-    override onCompileResult(compilerId: number, compiler: any, result: any) {
+    override onCompileResult(compilerId: number, compiler: CompilerInfo, result: CompilationResult) {
         if (this.compilerInfo.compilerId !== compilerId) return;
         this.functionSelector.clear(true);
         this.functionSelector.clearOptions();
-        if (result.cfg) {
-            const cfg = result.cfg as CFGResult;
+        const cfg = this.state.isircfg ? result.irOutput?.cfg : result.cfg;
+        if (cfg) {
             this.results = cfg;
+            this.contentsAreIr = !!this.state.isircfg || !!result.compilationOptions?.includes('-emit-llvm');
             let selectedFunction: string | null = this.state.selectedFunction;
             const keys = Object.keys(cfg);
             if (keys.length === 0) {
@@ -354,7 +363,7 @@ export class Cfg extends Pane<CfgState> {
             const raw_lines = node.label.split('\n');
             const highlighted_asm_untrimmed = await monaco.editor.colorize(
                 raw_lines.join('\n'),
-                'asm',
+                this.contentsAreIr ? 'llvm-ir' : 'asm',
                 MonacoConfig.extendConfig({}),
             );
             const highlighted_asm = await monaco.editor.colorize(
@@ -368,7 +377,7 @@ export class Cfg extends Pane<CfgState> {
                         }
                     })
                     .join('\n'),
-                'asm',
+                this.contentsAreIr ? 'llvm-ir' : 'asm',
                 MonacoConfig.extendConfig({}),
             );
             const untrimmed_lines = highlighted_asm_untrimmed.split('<br/>');
@@ -618,7 +627,7 @@ export class Cfg extends Pane<CfgState> {
                     y: block.coordinates.y + top + span_box.height / 2 + parseInt(block_style.paddingTop),
                     class: 'code',
                     fill: span_style.color,
-                })}>${escapeSVG(text)}</text>`;
+                })}>${escapeHTML(text)}</text>`;
             }
         }
         doc += '</svg>';
@@ -676,6 +685,7 @@ export class Cfg extends Pane<CfgState> {
             editorid: this.compilerInfo.editorId,
             treeid: this.compilerInfo.treeId,
             selectedFunction: this.state.selectedFunction,
+            isircfg: this.state.isircfg,
         };
         this.paneRenaming.addState(state);
         return state;
@@ -683,7 +693,7 @@ export class Cfg extends Pane<CfgState> {
 
     override close(): void {
         this.eventHub.unsubscribe();
-        this.eventHub.emit('cfgViewClosed', this.compilerInfo.compilerId);
+        this.eventHub.emit('cfgViewClosed', this.compilerInfo.compilerId, this.state.isircfg === true);
         this.fictitiousGraphContainer.remove();
     }
 }

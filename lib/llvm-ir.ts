@@ -22,14 +22,13 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-import _ from 'underscore';
-
 import type {IRResultLine} from '../types/asmresult/asmresult.interfaces.js';
 
 import * as utils from './utils.js';
 import {LLVMIrBackendOptions} from '../types/compilation/ir.interfaces.js';
 import {LLVMIRDemangler} from './demangler/llvm.js';
 import {ParseFiltersAndOutputOptions} from '../types/features/filters.interfaces.js';
+import {isString} from '../shared/common-utils.js';
 
 type MetaNode = {
     metaId: string;
@@ -45,14 +44,18 @@ export class LlvmIrParser {
     private metaNodeOptionsRe: RegExp;
     private llvmDebugLine: RegExp;
     private llvmDebugAnnotation: RegExp;
+    private otherMetadataAnnotation: RegExp;
     private attributeAnnotation: RegExp;
     private attributeDirective: RegExp;
     private moduleMetadata: RegExp;
     private functionAttrs: RegExp;
+    private commentOnly: RegExp;
+    private commentAtEOL: RegExp;
 
-    // TODO(jeremy-rifkin) can awful state things happen because of soring a demangler? Usually they're constructed
-    // fresh for each compile.
-    constructor(compilerProps, private readonly irDemangler: LLVMIRDemangler) {
+    constructor(
+        compilerProps,
+        private readonly irDemangler: LLVMIRDemangler,
+    ) {
         this.maxIrLines = 5000;
         if (compilerProps) {
             this.maxIrLines = compilerProps('maxLinesOfAsm', this.maxIrLines);
@@ -66,10 +69,13 @@ export class LlvmIrParser {
 
         this.llvmDebugLine = /^\s*call void @llvm\.dbg\..*$/;
         this.llvmDebugAnnotation = /,? !dbg !\d+/;
+        this.otherMetadataAnnotation = /,? !(?!dbg)[\w.]+ (!\d+)/;
         this.attributeAnnotation = /,? #\d+(?= )/;
         this.attributeDirective = /^attributes #\d+ = { .+ }$/;
         this.functionAttrs = /^; Function Attrs: .+$/;
         this.moduleMetadata = /^((source_filename|target datalayout|target triple) = ".+"|; ModuleID = '.+')$/;
+        this.commentOnly = /^\s*;.*$/;
+        this.commentAtEOL = /\s*;.*$/;
     }
 
     getFileName(debugInfo, scope): string | null {
@@ -150,7 +156,8 @@ export class LlvmIrParser {
         const result: IRResultLine[] = [];
         const irLines = utils.splitLines(ir);
         const debugInfo: Record<string, MetaNode> = {};
-        let prevLineEmpty = false;
+        // Set to true initially to prevent any leading newlines as a result of filtering
+        let prevLineEmpty = true;
 
         const filters: RegExp[] = [];
         const lineFilters: RegExp[] = [];
@@ -164,11 +171,16 @@ export class LlvmIrParser {
             filters.push(this.metaNodeRe);
             filters.push(this.otherMetaDirective);
             filters.push(this.namedMetaDirective);
+            lineFilters.push(this.otherMetadataAnnotation);
         }
         if (options.filterAttributes) {
             filters.push(this.attributeDirective);
             filters.push(this.functionAttrs);
             lineFilters.push(this.attributeAnnotation);
+        }
+        if (options.filterComments) {
+            filters.push(this.commentOnly);
+            lineFilters.push(this.commentAtEOL);
         }
 
         for (const line of irLines) {
@@ -233,46 +245,34 @@ export class LlvmIrParser {
         if (options.demangle) {
             return {
                 asm: (await this.irDemangler.process({asm: result})).asm,
-                labelDefinitions: {},
                 languageId: 'llvm-ir',
             };
         } else {
             return {
                 asm: result,
-                labelDefinitions: {},
                 languageId: 'llvm-ir',
             };
         }
     }
 
     async processFromFilters(ir, filters: ParseFiltersAndOutputOptions) {
-        if (_.isString(ir)) {
+        if (isString(ir)) {
             return await this.processIr(ir, {
                 filterDebugInfo: !!filters.debugCalls,
                 filterIRMetadata: !!filters.directives,
                 filterAttributes: false,
+                filterComments: !!filters.commentOnly,
                 demangle: !!filters.demangle,
                 // discard value names is handled earlier
             });
         }
         return {
             asm: [],
-            labelDefinitions: {},
         };
     }
 
     async process(ir: string, irOptions: LLVMIrBackendOptions) {
         return await this.processIr(ir, irOptions);
-    }
-
-    isLineLlvmDirective(line) {
-        return !!(
-            /^!\d+ = (distinct )?!(DI|{)/.test(line) ||
-            line.startsWith('!llvm') ||
-            line.startsWith('source_filename = ') ||
-            line.startsWith('target datalayout = ') ||
-            line.startsWith('target triple = ')
-        );
     }
 
     isLlvmIr(code) {
