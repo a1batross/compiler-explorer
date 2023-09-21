@@ -26,13 +26,14 @@ gen_compiler()
 	dotless_ver=$3
 	version=$4
 	name=$5
+	exe=$6
 
 	echo "compiler.${compiler}${lang}${dotless_ver}.semver=${version}"
 
-	if [ -e /opt/mcst/${name}/bin.wrappers/${lang} ]; then
-		echo "compiler.${compiler}${lang}${dotless_ver}.exe=/opt/mcst/${name}/bin.wrappers/${lang}"
+	if [ -e /opt/mcst/${name}/bin.wrappers/${exe} ]; then
+		echo "compiler.${compiler}${lang}${dotless_ver}.exe=/opt/mcst/${name}/bin.wrappers/${exe}"
 	else
-		echo "compiler.${compiler}${lang}${dotless_ver}.exe=/opt/mcst/${name}/bin/${lang}"
+		echo "compiler.${compiler}${lang}${dotless_ver}.exe=/opt/mcst/${name}/bin/${exe}"
 	fi
 }
 
@@ -66,24 +67,24 @@ for i in /opt/mcst/*; do
 	fi
 
 
-	gen_compiler "${compiler}" "lcc_c" "${dotless_ver}" "${version}" "${name}" >> $C_CONFIG
-	gen_compiler "${compiler}" "lcc" "${dotless_ver}" "${version}" "${name}" >> $CXX_CONFIG
-	gen_compiler "${compiler}" "lfortran" "${dotless_ver}" "${version}" "${name}" >> $FORT_CONFIG
+	gen_compiler "${compiler}" "lcc_c" "${dotless_ver}" "${version}" "${name}" "lcc" >> $C_CONFIG
+	gen_compiler "${compiler}" "lcc" "${dotless_ver}" "${version}" "${name}" "lcc" >> $CXX_CONFIG
+	gen_compiler "${compiler}" "lfortran" "${dotless_ver}" "${version}" "${name}" "lfortran" >> $FORT_CONFIG
 
 	if [[ $compiler == e ]]; then
-		cce_compilers="elcc_с${dotless_ver}:${cce_compilers}"
+		cce_compilers="elcc_c${dotless_ver}:${cce_compilers}"
 		cxxe_compilers="elcc${dotless_ver}:${cxxe_compilers}"
 		fe_compilers="elfortran${dotless_ver}:${fe_compilers}"
 	elif [[ $compiler == s ]]; then
-		ccs_compilers="slcc_с${dotless_ver}:${ccs_compilers}"
+		ccs_compilers="slcc_c${dotless_ver}:${ccs_compilers}"
 		cxxs_compilers="slcc${dotless_ver}:${cxxs_compilers}"
 		fs_compilers="slfortran${dotless_ver}:${fs_compilers}"
 	fi
 done
 
-echo "defaultCompiler=elcc_с$maxver" >> $C_CONFIG
-echo "group.slcc_с.compilers=${ccs_compilers}" >> $C_CONFIG
-echo "group.elcc_с.compilers=${cce_compilers}" >> $C_CONFIG
+echo "defaultCompiler=elcc_c$maxver" >> $C_CONFIG
+echo "group.slcc_c.compilers=${ccs_compilers}" >> $C_CONFIG
+echo "group.elcc_c.compilers=${cce_compilers}" >> $C_CONFIG
 
 echo "defaultCompiler=elcc$maxver" >> $CXX_CONFIG
 echo "group.slcc.compilers=${cxxs_compilers}" >> $CXX_CONFIG
