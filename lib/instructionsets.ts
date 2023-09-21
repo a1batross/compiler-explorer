@@ -171,6 +171,10 @@ export class InstructionSets {
                 target: [],
                 path: [],
             },
+            e2k: {
+                target: [],
+                path: [],
+            },
         };
     }
 
