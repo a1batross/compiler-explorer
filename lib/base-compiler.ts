@@ -172,6 +172,7 @@ export class BaseCompiler implements ICompiler {
     protected externalparser: null | ExternalParserBase;
     protected supportedLibraries?: Record<string, Library>;
     protected packager: Packager;
+    protected defaultRpathFlag: string = '-Wl,-rpath,';
     private static objdumpAndParseCounter = new PromClient.Counter({
         name: 'ce_objdumpandparsetime_total',
         help: 'Time spent on objdump and parsing of objdumps',
@@ -430,10 +431,14 @@ export class BaseCompiler implements ICompiler {
     }
 
     getDefaultExecOptions(): ExecutionOptions & {env: Record<string, string>} {
+        const env = this.env.getEnv(this.compiler.needsMulti);
+        if (this.compiler.extraPath?.length) {
+            env.PATH = this.compiler.extraPath.join(':') + ':' + env.PATH;
+        }
         return {
             timeoutMs: this.env.ceProps('compileTimeoutMs', 7500),
             maxErrorOutput: this.env.ceProps('max-error-output', 5000),
-            env: this.env.getEnv(this.compiler.needsMulti),
+            env,
             wrapper: this.compilerWrapper,
         };
     }
@@ -835,7 +840,7 @@ export class BaseCompiler implements ICompiler {
         return sortedlinks;
     }
 
-    getStaticLibraryLinks(libraries: CompileChildLibraries[]) {
+    getStaticLibraryLinks(libraries: CompileChildLibraries[]): string[] {
         const linkFlag = this.compiler.linkFlag || '-l';
 
         return this.getSortedStaticLibraries(libraries)
@@ -863,11 +868,11 @@ export class BaseCompiler implements ICompiler {
             .filter(link => link) as string[];
     }
 
-    getSharedLibraryPaths(libraries: CompileChildLibraries[]) {
+    getSharedLibraryPaths(libraries: CompileChildLibraries[]): string[] {
         return libraries
             .map(selectedLib => {
                 const foundVersion = this.findLibVersion(selectedLib);
-                if (!foundVersion) return false;
+                if (!foundVersion) return [];
 
                 const paths = [...foundVersion.libpath];
                 if (this.buildenvsetup && !this.buildenvsetup.extractAllToRoot) {
@@ -882,8 +887,8 @@ export class BaseCompiler implements ICompiler {
         libraries: CompileChildLibraries[],
         libDownloadPath?: string,
         toolchainPath?: string,
-    ) {
-        const pathFlag = this.compiler.rpathFlag || '-Wl,-rpath,';
+    ): string[] {
+        const pathFlag = this.compiler.rpathFlag || this.defaultRpathFlag;
         const libPathFlag = this.compiler.libpathFlag || '-L';
 
         let toolchainLibraryPaths: string[] = [];
@@ -902,10 +907,10 @@ export class BaseCompiler implements ICompiler {
             toolchainLibraryPaths.map(path => pathFlag + path),
             this.getSharedLibraryPaths(libraries).map(path => pathFlag + path),
             this.getSharedLibraryPaths(libraries).map(path => libPathFlag + path),
-        ) as string[];
+        );
     }
 
-    protected getSharedLibraryPathsAsLdLibraryPaths(libraries) {
+    protected getSharedLibraryPathsAsLdLibraryPaths(libraries): string[] {
         let paths = '';
         if (!this.alwaysResetLdPath) {
             paths = process.env.LD_LIBRARY_PATH || '';
@@ -914,10 +919,10 @@ export class BaseCompiler implements ICompiler {
             paths.split(path.delimiter).filter(p => !!p),
             this.compiler.ldPath,
             this.getSharedLibraryPaths(libraries),
-        ) as string[];
+        );
     }
 
-    getSharedLibraryPathsAsLdLibraryPathsForExecution(libraries) {
+    getSharedLibraryPathsAsLdLibraryPathsForExecution(libraries): string[] {
         let paths = '';
         if (!this.alwaysResetLdPath) {
             paths = process.env.LD_LIBRARY_PATH || '';
@@ -1862,7 +1867,7 @@ export class BaseCompiler implements ICompiler {
         executeParameters.args.unshift(outputFilename);
     }
 
-    async handleInterpreting(key, executeParameters): Promise<CompilationResult> {
+    async handleInterpreting(key, executeParameters: ExecutableExecutionOptions): Promise<CompilationResult> {
         const source = key.source;
         const dirPath = await this.newTempDir();
         const outputFilename = this.getExecutableFilename(dirPath, this.outputFilebase);
@@ -1893,7 +1898,11 @@ export class BaseCompiler implements ICompiler {
         };
     }
 
-    async doExecution(key, executeParameters, bypassCache: BypassCache): Promise<CompilationResult> {
+    async doExecution(
+        key,
+        executeParameters: ExecutableExecutionOptions,
+        bypassCache: BypassCache,
+    ): Promise<CompilationResult> {
         if (this.compiler.interpreted) {
             return this.handleInterpreting(key, executeParameters);
         }
