@@ -57,6 +57,8 @@ import {
     PopulatedConformanceViewState,
     EmptyIrViewState,
     PopulatedIrViewState,
+    EmptyClangirViewState,
+    PopulatedClangirViewState,
     EmptyRustMirViewState,
     PopulatedRustMirViewState,
     EmptyHaskellCoreViewState,
@@ -92,6 +94,7 @@ import {
     CFG_VIEW_COMPONENT_NAME,
     CONFORMANCE_VIEW_COMPONENT_NAME,
     IR_VIEW_COMPONENT_NAME,
+    CLANGIR_VIEW_COMPONENT_NAME,
     RUST_MIR_VIEW_COMPONENT_NAME,
     HASKELL_CORE_VIEW_COMPONENT_NAME,
     HASKELL_STG_VIEW_COMPONENT_NAME,
@@ -101,13 +104,15 @@ import {
     RUST_MACRO_EXP_VIEW_COMPONENT_NAME,
     RUST_HIR_VIEW_COMPONENT_NAME,
     DEVICE_VIEW_COMPONENT_NAME,
-    LLVM_OPT_PIPELINE_VIEW_COMPONENT_NAME,
-    EmptyLLVMOptPipelineViewState,
-    PopulatedLLVMOptPipelineViewState,
+    OPT_PIPELINE_VIEW_COMPONENT_NAME,
+    EmptyOptPipelineViewState,
+    PopulatedOptPipelineViewState,
     PopulatedStackUsageViewState,
     EmptyStackUsageViewState,
 } from './components.interfaces.js';
 import {ConfiguredOverrides} from './compilation/compiler-overrides.interfaces.js';
+import {ConfiguredRuntimeTools} from './execution/execution.interfaces.js';
+import {LanguageKey} from './languages.interfaces.js';
 
 /** Get an empty compiler component. */
 export function getCompiler(editorId: number, lang: string): ComponentConfig<EmptyCompilerState> {
@@ -182,10 +187,11 @@ export function getExecutorWith(
     editorId: number,
     lang: string,
     compilerId: string,
-    libraries: unknown,
-    compilerArgs,
+    libraries: {name: string; ver: string}[],
+    compilerArgs: string | undefined,
     treeId: number,
     overrides?: ConfiguredOverrides,
+    runtimeTools?: ConfiguredRuntimeTools,
 ): ComponentConfig<PopulatedExecutorState> {
     return {
         type: 'component',
@@ -200,6 +206,7 @@ export function getExecutorWith(
             compilationPanelShown: true,
             compilerOutShown: true,
             overrides: overrides,
+            runtimeTools: runtimeTools,
         },
     };
 }
@@ -223,7 +230,7 @@ export function getExecutorForTree(treeId: number, lang: string): ComponentConfi
  *
  * TODO: main.js calls this with no arguments.
  */
-export function getEditor(langId: string, id?: number): ComponentConfig<EmptyEditorState> {
+export function getEditor(langId: LanguageKey, id?: number): ComponentConfig<EmptyEditorState> {
     return {
         type: 'component',
         componentName: EDITOR_COMPONENT_NAME,
@@ -622,31 +629,65 @@ export function getIrViewWith(
     };
 }
 
-/** Get an empty ir view component. */
-export function getLLVMOptPipelineView(): ComponentConfig<EmptyLLVMOptPipelineViewState> {
+export function getClangirView(): ComponentConfig<EmptyClangirViewState> {
     return {
         type: 'component',
-        componentName: LLVM_OPT_PIPELINE_VIEW_COMPONENT_NAME,
+        componentName: CLANGIR_VIEW_COMPONENT_NAME,
         componentState: {},
     };
 }
 
-/** Get a ir view with the given configuration. */
-export function getLLVMOptPipelineViewWith(
+export function getClangirViewWith(
     id: number,
+    source: string,
+    clangirOutput: unknown,
     compilerName: string,
     editorid: number,
     treeid: number,
-): ComponentConfig<PopulatedLLVMOptPipelineViewState> {
+): ComponentConfig<PopulatedClangirViewState> {
     return {
         type: 'component',
-        componentName: LLVM_OPT_PIPELINE_VIEW_COMPONENT_NAME,
+        componentName: CLANGIR_VIEW_COMPONENT_NAME,
         componentState: {
             id,
+            source,
+            clangirOutput,
             compilerName,
             editorid,
             treeid,
-            selectedFunction: '',
+        },
+    };
+}
+
+/** Get an empty opt pipeline view component. */
+export function getOptPipelineView(): ComponentConfig<EmptyOptPipelineViewState> {
+    return {
+        type: 'component',
+        componentName: OPT_PIPELINE_VIEW_COMPONENT_NAME,
+        componentState: {},
+    };
+}
+
+/** Get a opt pipeline view with the given configuration. */
+export function getOptPipelineViewWith(
+    id: number,
+    lang: string,
+    compilerId: string,
+    compilerName: string,
+    editorid: number,
+    treeid: number,
+): ComponentConfig<PopulatedOptPipelineViewState> {
+    return {
+        type: 'component',
+        componentName: OPT_PIPELINE_VIEW_COMPONENT_NAME,
+        componentState: {
+            id,
+            lang,
+            compiler: compilerId,
+            compilerName,
+            editorid,
+            treeid,
+            selectedGroup: '',
             selectedIndex: 0,
             sidebarWidth: 0,
         },

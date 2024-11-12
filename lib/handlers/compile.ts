@@ -31,29 +31,40 @@ import Server from 'http-proxy';
 import PromClient, {Counter} from 'prom-client';
 import temp from 'temp';
 import _ from 'underscore';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
 import which from 'which';
 
-import {ICompiler, PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
+import {remove} from '../../shared/common-utils.js';
+import {
+    ActiveTool,
+    BypassCache,
+    ExecutionParams,
+    FiledataPair,
+    UnparsedExecutionParams,
+} from '../../types/compilation/compilation.interfaces.js';
+import {CompilerOverrideOptions} from '../../types/compilation/compiler-overrides.interfaces.js';
+import {CompilerInfo, PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
 import {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
+import {LanguageKey} from '../../types/languages.interfaces.js';
+import {SelectedLibraryVersion} from '../../types/libraries/libraries.interfaces.js';
+import {ResultLine} from '../../types/resultline/resultline.interfaces.js';
 import {BaseCompiler} from '../base-compiler.js';
 import {CompilationEnvironment} from '../compilation-env.js';
 import {getCompilerTypeByKey} from '../compilers/index.js';
 import {logger} from '../logger.js';
+import {ClientOptionsType} from '../options-handler.js';
 import {PropertyGetter} from '../properties.interfaces.js';
+import {SentryCapture} from '../sentry.js';
+import {KnownBuildMethod} from '../stats.js';
 import * as utils from '../utils.js';
 
 import {
     CompileRequestJsonBody,
     CompileRequestQueryArgs,
     CompileRequestTextBody,
-    ExecutionRequestParams,
+    ICompileHandler,
 } from './compile.interfaces.js';
-import {remove} from '../../shared/common-utils.js';
-import {CompilerOverrideOptions} from '../../types/compilation/compiler-overrides.interfaces.js';
-import {BypassCache, CompileChildLibraries, ExecutionParams} from '../../types/compilation/compilation.interfaces.js';
-import {SentryCapture} from '../sentry.js';
-import {ResultLine} from '../../types/resultline/resultline.interfaces.js';
-import {ClientOptionsType} from '../options-handler.js';
 
 temp.track();
 
@@ -67,7 +78,7 @@ function initialise(compilerEnv: CompilationEnvironment) {
 
     let cyclesBusy = 0;
     setInterval(() => {
-        const status = compilerEnv.compilationQueue.status();
+        const status = compilerEnv.compilationQueue!.status();
         if (status.busy) {
             cyclesBusy++;
             logger.warn(
@@ -85,19 +96,19 @@ function initialise(compilerEnv: CompilationEnvironment) {
     }, tempDirCleanupSecs * 1000);
 }
 
-type ParsedRequest = {
+export type ParsedRequest = {
     source: string;
     options: string[];
     backendOptions: Record<string, any>;
     filters: ParseFiltersAndOutputOptions;
     bypassCache: BypassCache;
-    tools: any;
-    executionParameters: ExecutionParams;
-    libraries: CompileChildLibraries[];
+    tools: ActiveTool[];
+    executeParameters: ExecutionParams;
+    libraries: SelectedLibraryVersion[];
 };
 
-export class CompileHandler {
-    private compilersById: Record<string, Record<string, BaseCompiler>> = {};
+export class CompileHandler implements ICompileHandler {
+    private compilersById: Partial<Record<LanguageKey, Record<string, BaseCompiler>>> = {};
     private readonly compilerEnv: CompilationEnvironment;
     private readonly textBanner: string;
     private readonly proxy: Server;
@@ -154,19 +165,24 @@ export class CompileHandler {
                     lang: body.lang,
                     compiler: body.compiler,
                     source: body.source,
-                    options: body.userArguments,
-                    filters: Object.fromEntries(
-                        [
-                            'commentOnly',
-                            'directives',
-                            'libraryCode',
-                            'labels',
-                            'demangle',
-                            'intel',
-                            'execute',
-                            'debugCalls',
-                        ].map(key => [key, body[key] === 'true']),
-                    ),
+                    options: {
+                        userArguments: body.userArguments,
+                        filters: Object.fromEntries(
+                            [
+                                'commentOnly',
+                                'directives',
+                                'libraryCode',
+                                'labels',
+                                'demangle',
+                                'intel',
+                                'execute',
+                                'debugCalls',
+                                'binary',
+                                'binaryObject',
+                                'trim',
+                            ].map(key => [key, body[key] === 'true']),
+                        ),
+                    },
                 });
             } else {
                 SentryCapture(
@@ -194,16 +210,25 @@ export class CompileHandler {
         });
     }
 
-    async create(compiler: PreliminaryCompilerInfo): Promise<ICompiler | null> {
+    hasLanguages(): boolean {
+        try {
+            return Object.keys(this.compilersById).length > 0;
+        } catch {
+            return false;
+        }
+    }
+
+    async create(compiler: PreliminaryCompilerInfo): Promise<BaseCompiler | null> {
         const isPrediscovered = !!compiler.version;
 
         const type = compiler.compilerType || 'default';
         let compilerClass: ReturnType<typeof getCompilerTypeByKey>;
         try {
             compilerClass = getCompilerTypeByKey(type);
-        } catch (e) {
+        } catch (e: any) {
             logger.error(`Compiler ID: ${compiler.id}`);
             logger.error(e);
+            logger.error(e.stack);
             process.exit(1);
         }
 
@@ -242,13 +267,16 @@ export class CompileHandler {
                 return null;
             }
         } else {
-            return new compilerClass(compiler, this.compilerEnv);
+            return new compilerClass(compiler, this.compilerEnv) as BaseCompiler;
         }
     }
 
-    async setCompilers(compilers: PreliminaryCompilerInfo[], clientOptions: ClientOptionsType) {
+    async setCompilers(
+        compilers: PreliminaryCompilerInfo[],
+        clientOptions: ClientOptionsType,
+    ): Promise<CompilerInfo[]> {
         // Be careful not to update this.compilersById until we can replace it entirely.
-        const compilersById = {};
+        const compilersById: Partial<Record<LanguageKey, Record<string, BaseCompiler>>> = {};
         try {
             this.clientOptions = clientOptions;
             logger.info('Creating compilers: ' + compilers.length);
@@ -271,6 +299,7 @@ export class CompileHandler {
             return createdCompilers.map(compiler => compiler.getInfo());
         } catch (err) {
             logger.error('Exception while processing compilers:', err);
+            return [];
         }
     }
 
@@ -278,15 +307,15 @@ export class CompileHandler {
         this.compilerEnv.setPossibleToolchains(toolchains);
     }
 
-    compilerAliasMatch(compiler, compilerId): boolean {
+    compilerAliasMatch(compiler: BaseCompiler, compilerId: string): boolean {
         return compiler.compiler.alias && compiler.compiler.alias.includes(compilerId);
     }
 
-    compilerIdOrAliasMatch(compiler, compilerId): boolean {
+    compilerIdOrAliasMatch(compiler: BaseCompiler, compilerId: string): boolean {
         return compiler.compiler.id === compilerId || this.compilerAliasMatch(compiler, compilerId);
     }
 
-    findCompiler(langId, compilerId): BaseCompiler | undefined {
+    findCompiler(langId: LanguageKey, compilerId: string): BaseCompiler | undefined {
         if (!compilerId) return;
 
         const langCompilers: Record<string, BaseCompiler> | undefined = this.compilersById[langId];
@@ -294,7 +323,7 @@ export class CompileHandler {
             if (langCompilers[compilerId]) {
                 return langCompilers[compilerId];
             } else {
-                const compiler = _.find(langCompilers, compiler => {
+                const compiler = _.find(langCompilers, (compiler: BaseCompiler) => {
                     return this.compilerAliasMatch(compiler, compilerId);
                 });
 
@@ -304,9 +333,9 @@ export class CompileHandler {
 
         // If the lang is bad, try to find it in every language
         let response: BaseCompiler | undefined;
-        _.each(this.compilersById, compilerInLang => {
+        _.each(this.compilersById, (compilerInLang: Record<string, BaseCompiler>) => {
             if (!response) {
-                response = _.find(compilerInLang, compiler => {
+                response = _.find(compilerInLang, (compiler: BaseCompiler) => {
                     return this.compilerIdOrAliasMatch(compiler, compilerId);
                 });
             }
@@ -315,7 +344,7 @@ export class CompileHandler {
         return response;
     }
 
-    compilerFor(req) {
+    compilerFor(req): BaseCompiler | undefined {
         if (req.is('json')) {
             const lang = req.lang || req.body.lang;
             const compiler = this.findCompiler(lang, req.params.compiler);
@@ -353,7 +382,7 @@ export class CompileHandler {
             filters: ParseFiltersAndOutputOptions,
             bypassCache = BypassCache.None,
             tools;
-        const execReqParams: ExecutionRequestParams = {};
+        const execReqParams: UnparsedExecutionParams = {};
         let libraries: any[] = [];
         // IF YOU MODIFY ANYTHING HERE PLEASE UPDATE THE DOCUMENTATION!
         if (req.is('json')) {
@@ -366,6 +395,7 @@ export class CompileHandler {
             const execParams = requestOptions.executeParameters || {};
             execReqParams.args = execParams.args;
             execReqParams.stdin = execParams.stdin;
+            execReqParams.runtimeTools = execParams.runtimeTools;
             backendOptions = requestOptions.compilerOptions || {};
             filters = {...compiler.getDefaultFilters(), ...requestOptions.filters};
             tools = requestOptions.tools;
@@ -380,7 +410,7 @@ export class CompileHandler {
 
             filters = compiler.getDefaultFilters();
             _.each(filters, (value, item) => {
-                filters[item] = textRequest[item] === 'true';
+                filters[item] = textRequest[item as keyof CompileRequestTextBody] === 'true';
             });
 
             backendOptions.filterAnsi = textRequest.filterAnsi === 'true';
@@ -395,7 +425,7 @@ export class CompileHandler {
             // If specified exactly, we'll take that with ?filters=a,b,c
             if (query.filters) {
                 filters = _.object(
-                    _.map(query.filters.split(','), filter => [filter, true]),
+                    query.filters.split(',').map(filter => [filter, true]),
                 ) as any as ParseFiltersAndOutputOptions;
             }
             // Add a filter. ?addFilters=binary
@@ -404,17 +434,18 @@ export class CompileHandler {
             });
             // Remove a filter. ?removeFilter=intel
             _.each((query.removeFilters || '').split(','), filter => {
-                if (filter) delete filters[filter];
+                if (filter) delete filters[filter as keyof ParseFiltersAndOutputOptions];
             });
             // Ask for asm not to be returned
             backendOptions.skipAsm = query.skipAsm === 'true';
             backendOptions.skipPopArgs = query.skipPopArgs === 'true';
         }
-        const executionParameters: ExecutionParams = {
+        const executeParameters: ExecutionParams = {
             args: Array.isArray(execReqParams.args)
                 ? execReqParams.args || ''
                 : utils.splitArguments(execReqParams.args),
             stdin: execReqParams.stdin || '',
+            runtimeTools: execReqParams.runtimeTools || [],
         };
 
         tools = tools || [];
@@ -433,12 +464,12 @@ export class CompileHandler {
             filters,
             bypassCache,
             tools,
-            executionParameters,
+            executeParameters,
             libraries,
         };
     }
 
-    handlePopularArguments(req: express.Request, res) {
+    handlePopularArguments(req: express.Request, res: express.Response) {
         const compiler = this.compilerFor(req);
         if (!compiler) {
             return res.sendStatus(404);
@@ -446,7 +477,7 @@ export class CompileHandler {
         res.send(compiler.possibleArguments.getPopularArguments(this.getUsedOptions(req)));
     }
 
-    handleOptimizationArguments(req: express.Request, res) {
+    handleOptimizationArguments(req: express.Request, res: express.Response) {
         const compiler = this.compilerFor(req);
         if (!compiler) {
             return res.sendStatus(404);
@@ -467,7 +498,7 @@ export class CompileHandler {
         return false;
     }
 
-    handleApiError(error, res: express.Response, next: express.NextFunction) {
+    handleApiError(error: any, res: express.Response, next: express.NextFunction) {
         if (error.message) {
             return res.status(400).send({
                 error: true,
@@ -486,8 +517,8 @@ export class CompileHandler {
 
         const remote = compiler.getRemote();
         if (remote) {
-            req.url = remote.path;
-            this.proxy.web(req, res, {target: remote.target, changeOrigin: true}, e => {
+            req.url = remote.cmakePath;
+            this.proxy.web(req, res, {target: remote.target, changeOrigin: true}, (e: any) => {
                 logger.error('Proxy error: ', e);
                 next(e);
             });
@@ -498,11 +529,17 @@ export class CompileHandler {
             if (req.body.files === undefined) throw new Error('Missing files property');
 
             this.cmakeCounter.inc({language: compiler.lang.id});
-            const options = this.parseRequest(req, compiler);
+            const parsedRequest = this.parseRequest(req, compiler);
+            this.compilerEnv.statsNoter.noteCompilation(
+                compiler.getInfo().id,
+                parsedRequest,
+                req.body.files as FiledataPair[],
+                KnownBuildMethod.CMake,
+            );
             compiler
                 // Backwards compatibility: bypassCache used to be a boolean.
                 // Convert a boolean input to an enum's underlying numeric value
-                .cmake(req.body.files, options, req.body.bypassCache * 1)
+                .cmake(req.body.files, parsedRequest, req.body.bypassCache * 1)
                 .then(result => {
                     if (result.didExecute || (result.execResult && result.execResult.didExecute))
                         this.cmakeExecuteCounter.inc({language: compiler.lang.id});
@@ -525,7 +562,7 @@ export class CompileHandler {
         const remote = compiler.getRemote();
         if (remote) {
             req.url = remote.path;
-            this.proxy.web(req, res, {target: remote.target, changeOrigin: true}, e => {
+            this.proxy.web(req, res, {target: remote.target, changeOrigin: true}, (e: any) => {
                 logger.error('Proxy error: ', e);
                 next(e);
             });
@@ -539,10 +576,10 @@ export class CompileHandler {
             return this.handleApiError(error, res, next);
         }
 
-        const {source, options, backendOptions, filters, bypassCache, tools, executionParameters, libraries} =
+        const {source, options, backendOptions, filters, bypassCache, tools, executeParameters, libraries} =
             parsedRequest;
 
-        let files;
+        let files: FiledataPair[] = [];
         if (req.body.files) files = req.body.files;
 
         if (source === undefined || Object.keys(req.body).length === 0) {
@@ -554,26 +591,22 @@ export class CompileHandler {
             const text = (array || []).map(line => line.text).join('\n');
             if (filterAnsi) {
                 // https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
-                return text.replaceAll(/(\x9B|\x1B\[)[0-9:;<=>?]*[ -/]*[@-~]/g, '');
+                return text.replaceAll(/(\x9B|\x1B\[)[\d:;<=>?]*[ -/]*[@-~]/g, '');
             } else {
                 return text;
             }
         }
 
         this.compileCounter.inc({language: compiler.lang.id});
+        this.compilerEnv.statsNoter.noteCompilation(
+            compiler.getInfo().id,
+            parsedRequest,
+            files as FiledataPair[],
+            KnownBuildMethod.Compile,
+        );
         // eslint-disable-next-line promise/catch-or-return
         compiler
-            .compile(
-                source,
-                options,
-                backendOptions,
-                filters,
-                bypassCache,
-                tools,
-                executionParameters,
-                libraries,
-                files,
-            )
+            .compile(source, options, backendOptions, filters, bypassCache, tools, executeParameters, libraries, files)
             .then(
                 result => {
                     if (result.didExecute || (result.execResult && result.execResult.didExecute))

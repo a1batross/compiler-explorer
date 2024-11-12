@@ -17,13 +17,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import {Transform, TransformCallback, TransformOptions} from 'stream';
-
-import yaml from 'yaml';
+import {parseAllDocuments} from 'yaml';
 
 import {logger} from './logger.js';
 
-type Path = string;
 type OptType = 'Missed' | 'Passed' | 'Analysis';
 
 type OptInfo = {
@@ -40,13 +37,13 @@ export type LLVMOptInfo = OptInfo & {
 };
 
 type DebugLoc = {
-    File: Path;
+    File: string;
     Line: number;
     Column: number;
 };
 
 function DisplayOptInfo(optInfo: LLVMOptInfo) {
-    return optInfo.Args.reduce((acc, x) => {
+    let displayString = optInfo.Args.reduce((acc, x) => {
         let inc = '';
         for (const [key, value] of Object.entries(x)) {
             if (key === 'DebugLoc') {
@@ -59,62 +56,31 @@ function DisplayOptInfo(optInfo: LLVMOptInfo) {
         }
         return acc + inc;
     }, '');
+    displayString = displayString.replaceAll('\n', ' ').replaceAll('\r', ' ');
+    return displayString;
 }
 
-const optTypeMatcher = /---\s(.*)\r?\n/;
-const docStart = '---';
-const docEnd = '\n...';
-const IsDocumentStart = (x: string) => x.startsWith(docStart);
-const FindDocumentEnd = (x: string) => {
-    const index = x.indexOf(docEnd);
-    return {found: index > -1, endpos: index + docEnd.length};
-};
-const splitAt = (index, xs) => [xs.slice(0, index), xs.slice(index)];
+export function processRawOptRemarks(buffer: string, compileFileName: string = ''): LLVMOptInfo[] {
+    const output: LLVMOptInfo[] = [];
+    const remarksSet: Set<string> = new Set<string>();
+    const remarks: any = parseAllDocuments(buffer);
+    for (const doc of remarks) {
+        if (doc.errors !== undefined && doc.errors.length > 0) {
+            logger.warn('YAMLParseError: ' + JSON.stringify(doc.errors[0]));
+            continue;
+        }
 
-export class LLVMOptTransformer extends Transform {
-    _buffer: string;
-    _prevOpts: Set<string>; // Avoid duplicate display of remarks
-    constructor(options?: TransformOptions) {
-        super({...(options || {}), objectMode: true});
-        this._buffer = '';
-        this._prevOpts = new Set<string>();
-    }
+        const opt = doc.toJS();
+        if (!opt.DebugLoc || !opt.DebugLoc.File || !opt.DebugLoc.File.includes(compileFileName)) continue;
 
-    override _flush(done: TransformCallback) {
-        this.processBuffer();
-        done();
-    }
-
-    override _transform(chunk: any, encoding: string, done: TransformCallback) {
-        this._buffer += chunk.toString();
-        //buffer until we have a start and end if at any time i care about improving performance stash the offset
-        this.processBuffer();
-        done();
-    }
-
-    processBuffer() {
-        while (IsDocumentStart(this._buffer)) {
-            const {found, endpos} = FindDocumentEnd(this._buffer);
-            if (found) {
-                const [head, tail] = splitAt(endpos, this._buffer);
-                const optTypeMatch = head.match(optTypeMatcher);
-                const opt = yaml.parse(head, {logLevel: 'error'});
-                const strOpt = JSON.stringify(opt);
-                if (!this._prevOpts.has(strOpt)) {
-                    this._prevOpts.add(strOpt);
-
-                    if (optTypeMatch) {
-                        opt.optType = optTypeMatch[1].replace('!', '');
-                    } else {
-                        logger.warn('missing optimization type');
-                    }
-                    opt.displayString = DisplayOptInfo(opt);
-                    this.push(opt as LLVMOptInfo);
-                }
-                this._buffer = tail.replace(/^\n/, '');
-            } else {
-                break;
-            }
+        const strOpt = JSON.stringify(opt);
+        if (!remarksSet.has(strOpt)) {
+            remarksSet.add(strOpt);
+            opt.optType = doc.contents.tag.substring(1); // remove leading '!'
+            opt.displayString = DisplayOptInfo(opt);
+            output.push(opt as LLVMOptInfo);
         }
     }
+
+    return output;
 }

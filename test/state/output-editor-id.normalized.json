@@ -18,12 +18,14 @@
             "execute": true,
             "intel": true,
             "labels": true,
+            "libraryCode": true,
             "debugCalls": false,
             "trim": true
           },
           "libs": [],
           "specialoutputs": ["compilerOutput"],
-          "tools": []
+          "tools": [],
+          "overrides": []
         }
       ],
       "executors": []

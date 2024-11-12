@@ -56,6 +56,7 @@ lacking some important point, please feel free to contribute to it and/or ask us
 
 Several videos showcase some features of Compiler Explorer:
 
+- [Compiler Explorer 2023: What's New?](https://www.youtube.com/watch?v=Ey0H79z_pco): Presentation for CppNorth 2023.
 - [Presentation for CppCon 2019 about the project](https://www.youtube.com/watch?v=kIoZDUd5DKw)
 - [Older 2 part series of videos](https://www.youtube.com/watch?v=4_HL3PH4wDg) which go into a bit more detail into the
   more obscure features.
@@ -79,8 +80,9 @@ important you can quickly and easily get running. Currently, **Compiler Explorer
 
 Running with `make EXTRA_ARGS='--language LANG'` will allow you to load `LANG` exclusively, where `LANG` is one for the
 language ids/aliases defined in `lib/languages.ts`. For example, to only run **Compiler Explorer** with C++ support,
-you'd run `make EXTRA_ARGS='--language c++'`. The `Makefile` will automatically install all the third-party libraries
-needed to run; using `npm` to install server-side and client-side components.
+you'd run `make EXTRA_ARGS='--language c++'`. You can supply multiple `--language` arguments to restrict to more than
+one language. The `Makefile` will automatically install all the third-party libraries needed to run; using `npm` to
+install server-side and client-side components.
 
 For development, we suggest using `make dev` to enable some useful features, such as automatic reloading on file changes
 and shorter startup times.
@@ -135,6 +137,18 @@ There's a development channel on the discord, and also a
 
 Feel free to raise an issue on [github](https://github.com/compiler-explorer/compiler-explorer/issues) or
 [email Matt directly](mailto:matt@godbolt.org) for more help.
+
+## Official domains
+
+Following are the official domains for Compiler Explorer:
+
+- https://godbolt.org/
+- https://godbo.lt/
+- https://compiler-explorer.com/
+
+The domains allow arbitrary subdomains, e.g., https://foo.godbolt.org/, which is convenient since each subdomain has an
+independent local state. Also, language subdomains such as https://rust.compiler-explorer.com/ will load with that
+language already selected.
 
 ## Credits
 

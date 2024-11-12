@@ -23,11 +23,9 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 // Setup sentry before anything else so we can capture errors
-import {SetupSentry, SentryCapture} from './sentry.js';
+import {SetupSentry, SentryCapture, setSentryLayout} from './sentry.js';
 
 SetupSentry();
-
-import {ga as analytics} from './analytics.js';
 
 import 'whatwg-fetch';
 import 'popper.js'; // eslint-disable-line requirejs/no-js-extension
@@ -67,6 +65,7 @@ import * as utils from '../shared/common-utils.js';
 import {Printerinator} from './print-view.js';
 import {formatISODate, updateAndCalcTopBarHeight} from './utils.js';
 import {localStorage, sessionThenLocalStorage} from './local.js';
+import {setupRealDark, takeUsersOutOfRealDark} from './real-dark.js';
 
 const logos = require.context('../views/resources/logos', false, /\.(png|svg)$/);
 
@@ -102,23 +101,9 @@ function setupSettings(hub: Hub): [Themer, SiteSettings] {
     let currentSettings: SiteSettings = JSON.parse(localStorage.get('settings', 'null')) || defaultSettings;
 
     function onChange(newSettings: SiteSettings) {
-        if (currentSettings.theme !== newSettings.theme) {
-            analytics.proxy('send', {
-                hitType: 'event',
-                eventCategory: 'ThemeChange',
-                eventAction: newSettings.theme,
-            });
-        }
-        if (currentSettings.colourScheme !== newSettings.colourScheme) {
-            analytics.proxy('send', {
-                hitType: 'event',
-                eventCategory: 'ColourSchemeChange',
-                eventAction: newSettings.colourScheme,
-            });
-        }
         $('#settings').find('.editorsFFont').css('font-family', newSettings.editorsFFont);
         currentSettings = newSettings;
-        localStorage.set('settings', JSON.stringify(newSettings));
+        Settings.setStoredSettings(newSettings);
         eventHub.emit('settingsChange', newSettings);
     }
 
@@ -224,11 +209,6 @@ function setupButtons(options: CompilerExplorerOptions, hub: Hub) {
         $.get(window.location.origin + window.httpRoot + 'bits/sponsors.html')
             .done(data => {
                 alertSystem.alert('Compiler Explorer Sponsors', data);
-                analytics.proxy('send', {
-                    hitType: 'event',
-                    eventCategory: 'Sponsors',
-                    eventAction: 'open',
-                });
             })
             .fail(err => {
                 const result = err.responseText || JSON.stringify(err);
@@ -366,7 +346,10 @@ function findConfig(defaultConfig: ConfigType, options: CompilerExplorerOptions,
             }
             if (!config) {
                 const savedState = sessionThenLocalStorage.get('gl', null);
-                config = savedState !== null ? JSON.parse(savedState) : defaultConfig;
+                if (savedState) config = JSON.parse(savedState);
+            }
+            if (!config.content || config.content.length === 0) {
+                config = defaultConfig;
             }
         }
     } else {
@@ -427,10 +410,8 @@ function initPolicies(options: CompilerExplorerOptions) {
             expires: 365,
             sameSite: 'strict',
         });
-        analytics.toggle(true);
     });
     simpleCooks.setOnDontConsent(() => {
-        analytics.toggle(false);
         jsCookie.set(options.policies.cookies.key, '', {
             sameSite: 'strict',
         });
@@ -462,8 +443,6 @@ function initPolicies(options: CompilerExplorerOptions) {
                 }
                 ccookiesBellNotification.addClass('d-none');
             });
-        } else if (hasCookieConsented(options)) {
-            analytics.initialise();
         }
     }
 }
@@ -576,6 +555,8 @@ function sizeCheckNavHideables() {
 
 // eslint-disable-next-line max-statements
 function start() {
+    takeUsersOutOfRealDark();
+
     initializeResetLayoutLink();
 
     const hostnameParts = window.location.hostname.split('.');
@@ -648,6 +629,8 @@ function start() {
         hub = new Hub(layout, subLangId, defaultLangId);
     }
 
+    setSentryLayout(layout);
+
     if (hub.hasTree()) {
         $('#add-tree').prop('disabled', true);
     }
@@ -665,7 +648,8 @@ function start() {
             // Only preserve state in localStorage in non-embedded mode.
             const shouldSave = !window.hasUIBeenReset && !hasUIBeenReset;
             if (!options.embedded && !isMobileViewer() && shouldSave) {
-                sessionThenLocalStorage.set('gl', JSON.stringify(layout.toConfig()));
+                if (layout.config.content && layout.config.content.length > 0)
+                    sessionThenLocalStorage.set('gl', JSON.stringify(layout.toConfig()));
             }
         });
 
@@ -746,14 +730,9 @@ function start() {
         $('[name="editor-btn-toolbar"]').addClass('d-none');
     }
 
+    setupRealDark(hub);
+
     window.onSponsorClick = (sponsorUrl: string) => {
-        analytics.proxy('send', {
-            hitType: 'event',
-            eventCategory: 'Sponsors',
-            eventAction: 'click',
-            eventLabel: sponsorUrl,
-            transport: 'beacon',
-        });
         window.open(sponsorUrl);
     };
 

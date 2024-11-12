@@ -31,20 +31,21 @@ import fs from 'fs-extra';
 import _ from 'underscore';
 import urljoin from 'url-join';
 
+import {AppDefaultArguments} from '../app.js';
+import {basic_comparator, remove} from '../shared/common-utils.js';
 import type {CompilerInfo, PreliminaryCompilerInfo} from '../types/compiler.interfaces.js';
+import {InstructionSet, InstructionSetsList} from '../types/instructionsets.js';
 import type {Language, LanguageKey} from '../types/languages.interfaces.js';
+import {Tool, ToolInfo} from '../types/tool.interfaces.js';
 
-import {unwrap, assert, unwrapString} from './assert.js';
+import {assert, unwrap, unwrapString} from './assert.js';
 import {InstanceFetcher} from './aws.js';
 import {CompileHandler} from './handlers/compile.js';
 import {logger} from './logger.js';
 import {ClientOptionsHandler} from './options-handler.js';
-import {CompilerProps, getRawProperties} from './properties.js';
 import type {PropertyGetter} from './properties.interfaces.js';
-import {basic_comparator, remove} from '../shared/common-utils.js';
+import {CompilerProps, getRawProperties} from './properties.js';
 import {getPossibleGccToolchainsFromCompilerInfo} from './toolchain-utils.js';
-import {InstructionSet, InstructionSetsList} from '../types/instructionsets.js';
-import {AppDefaultArguments} from '../app.js';
 
 const sleep = promisify(setTimeout);
 
@@ -152,6 +153,7 @@ export class CompilerFinder {
                                             compiler.remote = {
                                                 target: `${uriSchema}://${host}:${port}`,
                                                 path: urljoin('/', uriBase, 'api/compiler', compiler.id, 'compile'),
+                                                cmakePath: urljoin('/', uriBase, 'api/compiler', compiler.id, 'cmake'),
                                             };
                                             return compiler;
                                         });
@@ -180,20 +182,17 @@ export class CompilerFinder {
     async fetchAws() {
         logger.info('Fetching instances from AWS');
         const instances = await this.awsInstances();
-        return remove(
-            (
-                await Promise.all(
-                    instances.map(instance => {
-                        logger.info('Checking instance ' + instance.InstanceId);
-                        const address = this.awsProps('externalTestMode', false)
-                            ? instance.PublicDnsName
-                            : instance.PrivateDnsName;
-                        return this.fetchRemote(unwrap(address), this.args.port, '', this.awsProps, null);
-                    }),
-                )
-            ).flat(),
-            null,
+        const mapped = await Promise.all(
+            instances.map(instance => {
+                logger.info('Checking instance ' + instance.InstanceId);
+                const address = this.awsProps('externalTestMode', false)
+                    ? instance.PublicDnsName
+                    : instance.PrivateDnsName;
+                return this.fetchRemote(unwrap(address), this.args.port, '', this.awsProps, null);
+            }),
         );
+
+        return remove(mapped.flat(), null);
     }
 
     async compilerConfigFor(
@@ -337,7 +336,7 @@ export class CompilerFinder {
             },
             externalparser: {
                 id: props('externalparser', ''),
-                props: (name, def) => {
+                props: (name: string, def: any) => {
                     return props(`externalparser.${name}`, def);
                 },
             },
@@ -345,8 +344,10 @@ export class CompilerFinder {
                 link: props<string>('licenseLink'),
                 name: props<string>('licenseName'),
                 preamble: props<string>('licensePreamble'),
+                invasive: props<boolean>('licenseInvasive', false),
             },
             possibleOverrides: [],
+            possibleRuntimeTools: [],
             $order: undefined as unknown as number, // TODO(jeremy-rifkin): Very dirty
         };
 
@@ -385,7 +386,7 @@ export class CompilerFinder {
         if (compilerName.indexOf('&') === 0) {
             const groupName = compilerName.substring(1);
 
-            const props: CompilerProps['get'] = (langId, name, def?): any => {
+            const props: CompilerProps['get'] = (langId, name: string, def?): any => {
                 if (name === 'group') {
                     return groupName;
                 }
@@ -395,10 +396,14 @@ export class CompilerFinder {
                 .split(':')
                 .filter(s => s !== '');
             logger.debug(`Processing compilers from group ${groupName}`);
-            return (await Promise.all(exes.map(compiler => this.recurseGetCompilers(langId, compiler, props)))).flat();
+            const allCompilers = await Promise.all(
+                exes.map(compiler => this.recurseGetCompilers(langId, compiler, props)),
+            );
+            return allCompilers.flat();
         }
         if (compilerName === 'AWS') return this.fetchAws();
-        return remove([await this.compilerConfigFor(langId, compilerName, parentProps)], null);
+        const configs = [await this.compilerConfigFor(langId, compilerName, parentProps)];
+        return remove(configs, null);
     }
 
     async getCompilers() {
@@ -408,7 +413,8 @@ export class CompilerFinder {
                 compilers.push(this.recurseGetCompilers(langId, exe, this.compilerProps));
             }
         }
-        return (await Promise.all(compilers)).flat();
+        const completeCompilers = await Promise.all(compilers);
+        return completeCompilers.flat();
     }
 
     ensureDistinct(compilers: CompilerInfo[]) {
@@ -457,22 +463,19 @@ export class CompilerFinder {
         return langToCompilers;
     }
 
-    addNdkExes(langToCompilers) {
+    addNdkExes(langToCompilers: Record<LanguageKey, string[]>) {
         const ndkPaths = this.compilerProps(this.languages, 'androidNdk') as unknown as Record<string, string>;
         for (const [langId, ndkPath] of Object.entries(ndkPaths)) {
             if (ndkPath) {
                 const toolchains = fs.readdirSync(`${ndkPath}/toolchains`);
-                for (const [version, index] of toolchains) {
-                    const path = `${ndkPath}/toolchains/${version}/prebuilt/linux-x86_64/bin/`;
-                    if (fs.existsSync(path)) {
-                        const cc = fs.readdirSync(path).find(filename => filename.includes('g++'));
-                        toolchains[index] = path + cc;
-                    } else {
-                        toolchains[index] = null;
+                for (const version of toolchains) {
+                    const path = `${ndkPath}/toolchains/${version}/prebuilt/linux-x86_64/bin`;
+                    for (const exe of fs.readdirSync(path)) {
+                        if (exe.endsWith('clang++') || exe.endsWith('g++')) {
+                            langToCompilers[langId as LanguageKey].push(`${path}/${exe}`);
+                        }
                     }
                 }
-                // TODO: Something awful is going on with the type of toolchains here
-                langToCompilers[langId].push(toolchains.filter(x => x !== null));
             }
         }
     }
@@ -535,7 +538,11 @@ export class CompilerFinder {
                                     logger.error(
                                         `Duplicate compiler id ${propParts[1]} in domain ${domains.join(',')}`,
                                     );
-                                    error = true;
+                                    // android-java and android-kotlin are
+                                    // expected to use the exact same compilers.
+                                    if (lang !== 'android-java' && lang !== 'android-kotlin') {
+                                        error = true;
+                                    }
                                 }
                                 compilers.add(propParts[1]);
                             }
@@ -596,7 +603,7 @@ export class CompilerFinder {
             }
 
             if (compiler.externalparser) {
-                compiler.externalparser.props = (propName, def) => {
+                compiler.externalparser.props = (propName: string, def: any) => {
                     return this.compilerProps(langId, 'externalparser.' + propName, def);
                 };
             }
@@ -604,7 +611,7 @@ export class CompilerFinder {
             if (!compiler.remote && compiler.tools) {
                 const fullOptions = this.optionsHandler.get();
 
-                const toolinstances = {};
+                const toolinstances: Record<ToolInfo['id'], Tool> = {};
                 for (const toolId in compiler.tools) {
                     if (fullOptions.tools[langId][toolId]) {
                         toolinstances[toolId] = fullOptions.tools[langId][toolId];

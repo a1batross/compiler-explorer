@@ -25,6 +25,7 @@
 import type {PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
 import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
 import {BaseCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 
 import {ClangParser} from './argument-parsers.js';
 
@@ -33,13 +34,14 @@ export class LLCCompiler extends BaseCompiler {
         return 'llc';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
         this.compiler.supportsIntel = true;
-        this.compiler.supportsLLVMOptPipelineView = true;
-        this.compiler.llvmOptArg = ['-print-after-all', '-print-before-all'];
-        this.compiler.llvmOptModuleScopeArg = ['-print-module-scope'];
-        this.compiler.llvmOptNoDiscardValueNamesArg = [];
+        this.compiler.optPipeline = {
+            arg: ['-print-after-all', '-print-before-all'],
+            moduleScopeArg: ['-print-module-scope'],
+            noDiscardValueNamesArg: [],
+        };
     }
 
     override getSharedLibraryPathsAsArguments() {
@@ -53,7 +55,7 @@ export class LLCCompiler extends BaseCompiler {
         return options;
     }
 
-    override getArgumentParser() {
+    override getArgumentParserClass() {
         return ClangParser;
     }
 }

@@ -26,7 +26,6 @@ import * as monaco from 'monaco-editor';
 import _ from 'underscore';
 import $ from 'jquery';
 import * as colour from '../colour.js';
-import {ga} from '../analytics.js';
 import * as monacoConfig from '../monaco-config.js';
 import TomSelect from 'tom-select';
 import GoldenLayout from 'golden-layout';
@@ -41,13 +40,13 @@ import {assert} from '../assert.js';
 import {Alert} from '../widgets/alert';
 import {Compiler} from './compiler';
 import {InstructionSet} from '../instructionsets.js';
+import * as utils from '../utils.js';
 
 export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, DeviceAsmState> {
     private decorations: Record<string, monaco.editor.IModelDeltaDecoration[]>;
     private prevDecorations: string[];
     private selectedDevice: string;
     private devices: Record<string, CompilationResult> | null;
-    private colours: string[];
     private deviceCode: ResultLine[];
     private lastColours: Record<number, number>;
     private lastColourScheme: string;
@@ -67,7 +66,6 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
         this.selectedDevice = state.device || '';
         this.devices = null;
 
-        this.colours = [];
         this.deviceCode = [];
         this.lastColours = [];
         this.lastColourScheme = '';
@@ -88,8 +86,8 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
         return $('#device').html();
     }
 
-    override createEditor(editorRoot: HTMLElement): monaco.editor.IStandaloneCodeEditor {
-        return monaco.editor.create(
+    override createEditor(editorRoot: HTMLElement): void {
+        this.editor = monaco.editor.create(
             editorRoot,
             monacoConfig.extendConfig({
                 language: 'asm',
@@ -102,14 +100,6 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
 
     override getPrintName() {
         return 'Device Output';
-    }
-
-    override registerOpeningAnalyticsEvent(): void {
-        ga.proxy('send', {
-            hitType: 'event',
-            eventCategory: 'OpenViewPane',
-            eventAction: 'DeviceAsm',
-        });
     }
 
     override registerEditorActions(): void {
@@ -144,11 +134,6 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
         });
     }
     async onAsmToolTip(ed: monaco.editor.ICodeEditor) {
-        ga.proxy('send', {
-            hitType: 'event',
-            eventCategory: 'OpenModalPane',
-            eventAction: 'AsmDocs',
-        });
         const pos = ed.getPosition();
         if (!pos || !ed.getModel()) return;
         const word = ed.getModel()?.getWordAtPosition(pos);
@@ -227,7 +212,11 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
         this.editor.onDidChangeCursorSelection(e => cursorSelectionThrottledFunction(e));
 
         this.selectize.on('change', this.onDeviceSelect.bind(this));
-
+        this.selectize.on('dropdown_close', () => {
+            // scroll back to the selection on the next open
+            const selection = this.selectize.getOption(this.selectedDevice);
+            this.selectize.setActiveOption(selection);
+        });
         this.eventHub.on('colours', this.onColours, this);
         this.eventHub.on('panesLinkLine', this.onPanesLinkLine, this);
         this.eventHub.emit('deviceViewOpened', this.compilerInfo.compilerId);
@@ -312,7 +301,7 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
             const devOutput = this.devices[this.selectedDevice];
             const languageId = devOutput.languageId;
             if (devOutput.asm) {
-                this.showDeviceAsmResults(devOutput.asm, languageId);
+                this.showDeviceAsmResults(devOutput.asm as ResultLine[], languageId);
             } else {
                 this.showDeviceAsmResults(
                     [{text: `<Device ${this.selectedDevice} has errors>`}].concat(devOutput.stderr),
@@ -373,13 +362,13 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
 
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (id === this.compilerInfo.compilerId && this.deviceCode) {
-            const irColours = {};
+            const irColours: Record<number, number> = {};
             this.deviceCode.forEach((x: ResultLine, index: number) => {
                 if (x.source && x.source.file == null && x.source.line > 0 && colours[x.source.line - 1]) {
                     irColours[index] = colours[x.source.line - 1];
                 }
             });
-            this.colours = colour.applyColours(this.editor, irColours, scheme, this.colours);
+            colour.applyColours(irColours, scheme, this.editorDecorations);
         }
     }
 
@@ -417,7 +406,7 @@ export class DeviceAsm extends MonacoPane<monaco.editor.IStandaloneCodeEditor, D
                 e.target.position.lineNumber,
                 currentWord.endColumn,
             );
-            const numericToolTip = Compiler.getNumericToolTip(word);
+            const numericToolTip = utils.getNumericToolTip(word);
             if (numericToolTip) {
                 this.decorations.numericToolTip = [
                     {

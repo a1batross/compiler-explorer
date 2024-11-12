@@ -100,12 +100,14 @@
             "execute": false,
             "intel": true,
             "labels": true,
+            "libraryCode": true,
             "debugCalls": false,
             "trim": false
           },
           "libs": [],
           "specialoutputs": [],
-          "tools": []
+          "tools": [],
+          "overrides": []
         }
       ],
       "executors": []

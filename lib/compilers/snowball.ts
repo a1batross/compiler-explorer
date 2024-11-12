@@ -26,8 +26,10 @@ import _ from 'underscore';
 
 import type {PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
 import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
+import {SelectedLibraryVersion} from '../../types/libraries/libraries.interfaces.js';
 import {unwrap} from '../assert.js';
 import {BaseCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 
 export class SnowballCompiler extends BaseCompiler {
     linker: string;
@@ -36,22 +38,26 @@ export class SnowballCompiler extends BaseCompiler {
         return 'snowball';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
-        this.compiler.supportsIntel = false;
+        this.compiler.supportsIntel = true;
         this.compiler.supportsIrView = true;
-        this.compiler.supportsLLVMOptPipelineView = true;
+        this.compiler.optPipeline = {
+            arg: [],
+            moduleScopeArg: [],
+            noDiscardValueNamesArg: [],
+        };
         this.compiler.supportsCfg = true;
 
         this.compiler.irArg = ['--emit', 'llvm-ir'];
         this.linker = this.compilerProps<string>('linker');
     }
 
-    override getSharedLibraryPathsAsArguments(libraries, libDownloadPath) {
+    override getSharedLibraryPathsAsArguments(libraries: SelectedLibraryVersion[], libDownloadPath?: string) {
         return [];
     }
 
-    override getSharedLibraryLinks(libraries: any[]): string[] {
+    override getSharedLibraryLinks(libraries: SelectedLibraryVersion[]): string[] {
         return [];
     }
 
@@ -66,30 +72,29 @@ export class SnowballCompiler extends BaseCompiler {
         staticLibLinks: string[],
     ) {
         return options.concat(userOptions, libIncludes, libOptions, libPaths, libLinks, staticLibLinks, [
-            '-f',
+            '--file',
             this.filename(inputFilename),
         ]);
     }
 
     override optionsForFilter(filters: ParseFiltersAndOutputOptions, outputFilename: string, userOptions?: string[]) {
-        let options = ['build', '--silent', '-o', this.filename(outputFilename)];
+        let options = ['build', '--silent', '--output', this.filename(outputFilename)];
 
         const userRequestedEmit = _.any(unwrap(userOptions), opt => opt.includes('--emit'));
         if (filters.binary) {
-            options = options.concat(['--emit', 'exec']);
+            options = options.concat(['--emit', 'exe']);
         } else if (filters.binaryObject) {
-            options = options.concat(['--emit', 'lib']);
+            options = options.concat(['--emit', 'obj']);
         } else {
             if (!userRequestedEmit) {
                 options = options.concat('--emit', 'asm');
             }
-            // TODO:
-            // if (filters.intel) options = options.concat('--llvm-args', '--x86-asm-syntax=intel');
+            if (filters.intel) options = options.concat('--x86-asm-syntax=intel');
         }
         return options;
     }
 
-    override isCfgCompiler(/*compilerVersion*/) {
+    override isCfgCompiler() {
         return true;
     }
 }

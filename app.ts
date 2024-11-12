@@ -33,27 +33,34 @@ import bodyParser from 'body-parser';
 import compression from 'compression';
 import express from 'express';
 import fs from 'fs-extra';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
 import morgan from 'morgan';
 import nopt from 'nopt';
 import PromClient from 'prom-client';
 import responseTime from 'response-time';
 import sanitize from 'sanitize-filename';
 import sFavicon from 'serve-favicon';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
 import systemdSocket from 'systemd-socket';
 import _ from 'underscore';
 import urljoin from 'url-join';
 
 import * as aws from './lib/aws.js';
 import * as normalizer from './lib/clientstate-normalizer.js';
+import {GoldenLayoutRootStruct} from './lib/clientstate-normalizer.js';
 import {CompilationEnvironment} from './lib/compilation-env.js';
 import {CompilationQueue} from './lib/compilation-queue.js';
 import {CompilerFinder} from './lib/compiler-finder.js';
-// import { policy as csp } from './lib/csp.js';
 import {startWineInit} from './lib/exec.js';
+import {RemoteExecutionQuery} from './lib/execution/execution-query.js';
+import {initHostSpecialties} from './lib/execution/execution-triple.js';
+import {startExecutionWorkerThread} from './lib/execution/sqs-execution-queue.js';
 import {CompileHandler} from './lib/handlers/compile.js';
 import * as healthCheck from './lib/handlers/health-check.js';
 import {NoScriptHandler} from './lib/handlers/noscript.js';
-import {RouteAPI} from './lib/handlers/route-api.js';
+import {RouteAPI, ShortLinkMetaData} from './lib/handlers/route-api.js';
 import {loadSiteTemplates} from './lib/handlers/site-templates.js';
 import {SourceHandler} from './lib/handlers/source.js';
 import {languages as allLanguages} from './lib/languages.js';
@@ -68,16 +75,46 @@ import {loadSponsorsFromString} from './lib/sponsors.js';
 import {getStorageTypeByKey} from './lib/storage/index.js';
 import * as utils from './lib/utils.js';
 import {ElementType} from './shared/common-utils.js';
+import {CompilerInfo} from './types/compiler.interfaces.js';
 import type {Language, LanguageKey} from './types/languages.interfaces.js';
 
 // Used by assert.ts
 global.ce_base_directory = new URL('.', import.meta.url);
 
-(nopt as any).invalidHandler = (key, val, types) => {
+(nopt as any).invalidHandler = (key: string, val: unknown, types: unknown[]) => {
     logger.error(
-        `Command line argument type error for "--${key}=${val}", expected ${types.map(t => typeof t).join(' | ')}`,
+        `Command line argument type error for "--${key}=${val}", 
+        expected ${types.map((t: unknown) => typeof t).join(' | ')}`,
     );
 };
+
+export type CompilerExplorerOptions = Partial<{
+    env: string[];
+    rootDir: string;
+    host: string;
+    port: number;
+    propDebug: boolean;
+    debug: boolean;
+    dist: boolean;
+    archivedVersions: string;
+    noRemoteFetch: boolean;
+    tmpDir: string;
+    wsl: boolean;
+    language: string[];
+    noCache: boolean;
+    ensureNoIdClash: boolean;
+    logHost: string;
+    logPort: number;
+    hostnameForLogging: string;
+    suppressConsoleLog: boolean;
+    metricsPort: number;
+    loki: string;
+    discoveryonly: string;
+    prediscovered: string;
+    version: boolean;
+    webpackContent: string;
+    noLocal: boolean;
+}>;
 
 // Parse arguments from command line 'node ./app.js args...'
 const opts = nopt({
@@ -94,7 +131,7 @@ const opts = nopt({
     tmpDir: [String],
     wsl: [Boolean],
     // If specified, only loads the specified languages, resulting in faster loadup/iteration times
-    language: [String],
+    language: [String, Array],
     // Do not use caching for compilation results (Requests might still be cached by the client's browser)
     noCache: [Boolean],
     // Don't cleanly run if two or more compilers have clashing ids
@@ -110,33 +147,7 @@ const opts = nopt({
     version: [Boolean],
     webpackContent: [String],
     noLocal: [Boolean],
-}) as Partial<{
-    env: string[];
-    rootDir: string;
-    host: string;
-    port: number;
-    propDebug: boolean;
-    debug: boolean;
-    dist: boolean;
-    archivedVersions: string;
-    noRemoteFetch: boolean;
-    tmpDir: string;
-    wsl: boolean;
-    language: string;
-    noCache: boolean;
-    ensureNoIdClash: boolean;
-    logHost: string;
-    logPort: number;
-    hostnameForLogging: string;
-    suppressConsoleLog: boolean;
-    metricsPort: number;
-    loki: string;
-    discoveryonly: string;
-    prediscovered: string;
-    version: boolean;
-    webpackContent: string;
-    noLocal: boolean;
-}>;
+}) as CompilerExplorerOptions;
 
 if (opts.debug) logger.level = 'debug';
 
@@ -147,12 +158,17 @@ if (process.platform === 'linux' && child_process.execSync('uname -a').toString(
     process.env.wsl = 'true';
 }
 
-// AP: Allow setting of tmpDir (used in lib/base-compiler.js & lib/exec.js) through opts.
-// WSL requires a directory on a Windows volume. Set that to Windows %TEMP% if no tmpDir supplied.
+// Allow setting of the temporary directory (that which `os.tmpdir()` returns).
+// WSL requires a directory on a Windows volume. Set that to Windows %TEMP% if no -tmpDir supplied.
 // If a tempDir is supplied then assume that it will work for WSL processes as well.
 if (opts.tmpDir) {
-    process.env.tmpDir = opts.tmpDir;
-    process.env.winTmp = opts.tmpDir;
+    if (process.env.wsl) {
+        process.env.TEMP = opts.tmpDir; // for Windows
+    } else {
+        process.env.TMP = opts.tmpDir; // for Linux
+    }
+    if (os.tmpdir() !== opts.tmpDir)
+        throw new Error(`Unable to set the temporary dir to ${opts.tmpDir} - stuck at  ${os.tmpdir()}`);
 } else if (process.env.wsl) {
     // Dec 2017 preview builds of WSL include /bin/wslpath; do the parsing work for now.
     // Parsing example %TEMP% is C:\Users\apardoe\AppData\Local\Temp
@@ -160,11 +176,12 @@ if (opts.tmpDir) {
         const windowsTemp = child_process.execSync('cmd.exe /c echo %TEMP%').toString().replaceAll('\\', '/');
         const driveLetter = windowsTemp.substring(0, 1).toLowerCase();
         const directoryPath = windowsTemp.substring(2).trim();
-        process.env.winTmp = path.join('/mnt', driveLetter, directoryPath);
+        process.env.TEMP = path.join('/mnt', driveLetter, directoryPath);
     } catch (e) {
         logger.warn('Unable to invoke cmd.exe to get windows %TEMP% path.');
     }
 }
+logger.info(`Using temporary dir: ${os.tmpdir()}`);
 
 const distPath = utils.resolvePathFromAppRoot('.');
 logger.debug(`Distpath=${distPath}`);
@@ -201,12 +218,21 @@ export type AppDefaultArguments = {
     port: number;
     gitReleaseName: string;
     releaseBuildNumber: string;
-    wantedLanguages: string | null;
+    wantedLanguages: string[] | null;
     doCache: boolean;
     fetchCompilersFromRemote: boolean;
     ensureNoCompilerClash: boolean | undefined;
     suppressConsoleLog: boolean;
 };
+
+function patchUpLanguageArg(languages: string[] | undefined): string[] | null {
+    if (!languages) return null;
+    if (languages.length === 1) {
+        // Support old style comma-separated language args.
+        return languages[0].split(',');
+    }
+    return languages;
+}
 
 // Set default values for omitted arguments
 const defArgs: AppDefaultArguments = {
@@ -216,7 +242,7 @@ const defArgs: AppDefaultArguments = {
     port: opts.port || 10240,
     gitReleaseName: gitReleaseName,
     releaseBuildNumber: releaseBuildNumber,
-    wantedLanguages: opts.language || null,
+    wantedLanguages: patchUpLanguageArg(opts.language),
     doCache: !opts.noCache,
     fetchCompilersFromRemote: !opts.noRemoteFetch,
     ensureNoCompilerClash: opts.ensureNoIdClash,
@@ -253,7 +279,7 @@ function getFaviconFilename() {
 const propHierarchy = [
     'defaults',
     defArgs.env,
-    _.map(defArgs.env, e => `${e}.${process.platform}`),
+    defArgs.env.map(e => `${e}.${process.platform}`),
     process.platform,
     os.hostname(),
 ].flat();
@@ -271,13 +297,15 @@ props.initialize(configDir, propHierarchy);
 // Instantiate a function to access records concerning "compiler-explorer"
 // in hidden object props.properties
 const ceProps = props.propsFor('compiler-explorer');
-defArgs.wantedLanguages = ceProps<string>('restrictToLanguages', defArgs.wantedLanguages);
+const restrictToLanguages = ceProps<string>('restrictToLanguages');
+if (restrictToLanguages) {
+    defArgs.wantedLanguages = restrictToLanguages.split(',');
+}
 
 const languages = (() => {
     if (defArgs.wantedLanguages) {
         const filteredLangs: Partial<Record<LanguageKey, Language>> = {};
-        const passedLangs = defArgs.wantedLanguages.split(',');
-        for (const wantedLang of passedLangs) {
+        for (const wantedLang of defArgs.wantedLanguages) {
             for (const lang of Object.values(allLanguages)) {
                 if (lang.id === wantedLang || lang.name === wantedLang || lang.alias.includes(wantedLang)) {
                     filteredLangs[lang.id] = lang;
@@ -308,7 +336,7 @@ const httpRoot = urljoin(ceProps('httpRoot', '/'), '/');
 const staticUrl = ceProps<string | undefined>('staticUrl');
 const staticRoot = urljoin(staticUrl || urljoin(httpRoot, 'static'), '/');
 
-function staticHeaders(res) {
+function staticHeaders(res: express.Response) {
     if (staticMaxAgeSecs) {
         res.setHeader('Cache-Control', 'public, max-age=' + staticMaxAgeSecs + ', must-revalidate');
     }
@@ -369,7 +397,7 @@ let pugRequireHandler: (path: string) => any = () => {
 async function setupWebPackDevMiddleware(router: express.Router) {
     logger.info('  using webpack dev middleware');
 
-    /* eslint-disable node/no-unpublished-import,import/extensions, */
+    /* eslint-disable n/no-unpublished-import,import/extensions, */
     const {default: webpackDevMiddleware} = await import('webpack-dev-middleware');
     const {default: webpackConfig} = await import('./webpack.config.esm.js');
     const {default: webpack} = await import('webpack');
@@ -510,9 +538,16 @@ async function main() {
 
     startWineInit();
 
+    RemoteExecutionQuery.initRemoteExecutionArchs(ceProps, defArgs.env);
+
     const clientOptionsHandler = new ClientOptionsHandler(sources, compilerProps, defArgs);
     const compilationQueue = CompilationQueue.fromProps(compilerProps.ceProps);
-    const compilationEnvironment = new CompilationEnvironment(compilerProps, compilationQueue, defArgs.doCache);
+    const compilationEnvironment = new CompilationEnvironment(
+        compilerProps,
+        awsProps,
+        compilationQueue,
+        defArgs.doCache,
+    );
     const compileHandler = new CompileHandler(compilationEnvironment, awsProps);
     const storageType = getStorageTypeByKey(storageSolution);
     const storageHandler = new storageType(httpRoot, compilerProps, awsProps);
@@ -523,16 +558,24 @@ async function main() {
     if (gitReleaseName) logger.info(`  git release ${gitReleaseName}`);
     if (releaseBuildNumber) logger.info(`  release build ${releaseBuildNumber}`);
 
-    let initialCompilers;
-    let prevCompilers;
+    let initialCompilers: CompilerInfo[];
+    let prevCompilers: CompilerInfo[];
+
+    const isExecutionWorker = ceProps<boolean>('execqueue.is_worker', false);
 
     if (opts.prediscovered) {
         const prediscoveredCompilersJson = await fs.readFile(opts.prediscovered, 'utf8');
         initialCompilers = JSON.parse(prediscoveredCompilersJson);
-        await compilerFinder.loadPrediscovered(initialCompilers);
+        const prediscResult = await compilerFinder.loadPrediscovered(initialCompilers);
+        if (prediscResult.length === 0) {
+            throw new Error('Unexpected failure, no compilers found!');
+        }
     } else {
         const initialFindResults = await compilerFinder.find();
         initialCompilers = initialFindResults.compilers;
+        if (!isExecutionWorker && initialCompilers.length === 0) {
+            throw new Error('Unexpected failure, no compilers found!');
+        }
         if (defArgs.ensureNoCompilerClash) {
             logger.warn('Ensuring no compiler ids clash');
             if (initialFindResults.foundClash) {
@@ -562,10 +605,12 @@ async function main() {
 
     const healthCheckFilePath = ceProps('healthCheckFilePath', false);
 
-    const handlerConfig = {
+    // Exported to allow compilers to refer to other existing compilers.
+    global.handler_config = {
         compileHandler,
         clientOptionsHandler,
         storageHandler,
+        compilationEnvironment,
         ceProps,
         opts,
         defArgs,
@@ -575,14 +620,14 @@ async function main() {
         contentPolicyHeader,
     };
 
-    const noscriptHandler = new NoScriptHandler(router, handlerConfig);
-    const routeApi = new RouteAPI(router, handlerConfig);
+    const noscriptHandler = new NoScriptHandler(router, global.handler_config);
+    const routeApi = new RouteAPI(router, global.handler_config);
 
-    async function onCompilerChange(compilers) {
+    async function onCompilerChange(compilers: CompilerInfo[]) {
         if (JSON.stringify(prevCompilers) === JSON.stringify(compilers)) {
             return;
         }
-        logger.info(`Compiler scan count: ${_.size(compilers)}`);
+        logger.info(`Compiler scan count: ${compilers.length}`);
         logger.debug('Compilers:', compilers);
         prevCompilers = compilers;
         await clientOptionsHandler.setCompilers(compilers);
@@ -623,7 +668,7 @@ async function main() {
         .use(
             responseTime((req, res, time) => {
                 if (sentrySlowRequestMs > 0 && time >= sentrySlowRequestMs) {
-                    Sentry.withScope(scope => {
+                    Sentry.withScope((scope: Sentry.Scope) => {
                         scope.setExtra('duration_ms', time);
                         Sentry.captureMessage('SlowRequest', 'warning');
                     });
@@ -631,7 +676,11 @@ async function main() {
             }),
         )
         // Handle healthchecks at the root, as they're not expected from the outside world
-        .use('/healthcheck', new healthCheck.HealthCheckHandler(compilationQueue, healthCheckFilePath).handle)
+        .use(
+            '/healthcheck',
+            new healthCheck.HealthCheckHandler(compilationQueue, healthCheckFilePath, compileHandler, isExecutionWorker)
+                .handle,
+        )
         .use(httpRoot, router)
         .use((req, res, next) => {
             next({status: 404, message: `page "${req.path}" could not be found`});
@@ -639,7 +688,7 @@ async function main() {
         // sentry error handler must be the first error handling middleware
         .use(Sentry.Handlers.errorHandler)
         // eslint-disable-next-line no-unused-vars
-        .use((err, req, res, next) => {
+        .use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
             const status =
                 err.status || err.statusCode || err.status_code || (err.output && err.output.statusCode) || 500;
             const message = err.message || 'Internal Server Error';
@@ -654,7 +703,7 @@ async function main() {
 
     loadSiteTemplates(configDir);
 
-    function renderConfig(extra, urlOptions?) {
+    function renderConfig(extra: Record<string, any>, urlOptions?: any) {
         const urlOptionsAllowed = ['readOnly', 'hideEditorToolbars', 'language'];
         const filteredUrlOptions = _.mapObject(_.pick(urlOptions, urlOptionsAllowed), val => utils.toProperty(val));
         const allExtraOptions = _.extend({}, filteredUrlOptions, extra);
@@ -680,11 +729,16 @@ async function main() {
         return options;
     }
 
-    function isMobileViewer(req) {
+    function isMobileViewer(req: express.Request) {
         return req.header('CloudFront-Is-Mobile-Viewer') === 'true';
     }
 
-    function renderGoldenLayout(config, metadata, req, res) {
+    function renderGoldenLayout(
+        config: GoldenLayoutRootStruct,
+        metadata: ShortLinkMetaData,
+        req: express.Request,
+        res: express.Response,
+    ) {
         staticHeaders(res);
         contentPolicyHeader(res);
 
@@ -727,61 +781,26 @@ async function main() {
     // Based on combined format, but: GDPR compliant IP, no timestamp & no unused fields for our usecase
     const morganFormat = isDevMode() ? 'dev' : ':gdpr_ip ":method :url" :status';
 
-    /*
-     * This is a workaround to make cross origin monaco web workers function
-     * in spite of the monaco webpack plugin hijacking the MonacoEnvironment global.
-     *
-     * see https://github.com/microsoft/monaco-editor-webpack-plugin/issues/42
-     *
-     * This workaround wouldn't be so bad, if it didn't _also_ rely on *another* bug to
-     * actually work.
-     *
-     * The webpack plugin incorrectly uses
-     *     window.__webpack_public_path__
-     * when it should use
-     *     __webpack_public_path__
-     *
-     * see https://github.com/microsoft/monaco-editor-webpack-plugin/pull/63
-     *
-     * We can leave __webpack_public_path__ with the correct value, which lets runtime chunk
-     * loading continue to function correctly.
-     *
-     * We can then set window.__webpack_public_path__ to the below handler, which lets us
-     * fabricate a worker on the fly.
-     *
-     * This is bad and I feel bad.
-     *
-     * This should no longer be needed, but is left here for safety because people with
-     * workers already installed from this url may still try to hit this page for some time
-     *
-     * TODO: remove this route in the future now that it is not needed
-     */
-    router.get('/workers/:worker', (req, res) => {
-        staticHeaders(res);
-        res.set('Content-Type', 'application/javascript');
-        res.end(`importScripts('${urljoin(staticRoot, req.params.worker)}');`);
-    });
-
     router
         .use(
             morgan(morganFormat, {
                 stream: makeLogStream('info'),
                 // Skip for non errors (2xx, 3xx)
-                skip: (req, res) => res.statusCode >= 400,
+                skip: (req: express.Request, res: express.Response) => res.statusCode >= 400,
             }),
         )
         .use(
             morgan(morganFormat, {
                 stream: makeLogStream('warn'),
                 // Skip for non user errors (4xx)
-                skip: (req, res) => res.statusCode < 400 || res.statusCode >= 500,
+                skip: (req: express.Request, res: express.Response) => res.statusCode < 400 || res.statusCode >= 500,
             }),
         )
         .use(
             morgan(morganFormat, {
                 stream: makeLogStream('error'),
                 // Skip for non server errors (5xx)
-                skip: (req, res) => res.statusCode < 500,
+                skip: (req: express.Request, res: express.Response) => res.statusCode < 500,
             }),
         )
         .use(compression())
@@ -859,6 +878,13 @@ async function main() {
         logger.info('  with disabled caching');
     }
     setupEventLoopLagLogging();
+
+    if (isExecutionWorker) {
+        await initHostSpecialties();
+
+        startExecutionWorkerThread(ceProps, awsProps, compilationEnvironment);
+    }
+
     startListening(webServer);
 }
 

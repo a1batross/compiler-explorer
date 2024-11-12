@@ -24,6 +24,7 @@
 
 import _ from 'underscore';
 
+import {isString} from '../../shared/common-utils.js';
 import {
     AsmResultLabel,
     AsmResultSource,
@@ -32,7 +33,6 @@ import {
 } from '../../types/asmresult/asmresult.interfaces.js';
 import {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
 import {assert} from '../assert.js';
-import {isString} from '../../shared/common-utils.js';
 import {PropertyGetter} from '../properties.interfaces.js';
 import * as utils from '../utils.js';
 
@@ -113,7 +113,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         this.definesGlobal = /^\s*\.(?:globa?l|GLB|export)\s*([.A-Z_a-z][\w$.]*)/;
         this.definesWeak = /^\s*\.(?:weakext|weak)\s*([.A-Z_a-z][\w$.]*)/;
         this.indentedLabelDef = /^\s*([$.A-Z_a-z][\w$.]*):/;
-        this.assignmentDef = /^\s*([$.A-Z_a-z][\w$.]*)\s*=/;
+        this.assignmentDef = /^\s*([$.A-Z_a-z][\w$.]*)\s*=\s*(.*)/;
         this.directive = /^\s*\..*$/;
         // These four regexes when phrased as /\s*#APP.*/ etc exhibit costly polynomial backtracking
         // Instead use ^$ and test with regex.test(line.trim()), more robust anyway
@@ -171,15 +171,15 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         this.blockComments = /^[\t ]*\/\*(\*(?!\/)|[^*])*\*\/\s*/gm;
     }
 
-    checkVLIWpacket(line, inVLIWpacket) {
+    checkVLIWpacket(line: string, inVLIWpacket: boolean) {
         return inVLIWpacket;
     }
 
-    hasOpcode(line, inNvccCode, inVLIWpacket?) {
+    hasOpcode(line: string, inNvccCode: boolean = false, inVLIWpacket: boolean = false) {
         // Remove any leading label definition...
         const match = line.match(this.labelDef);
         if (match) {
-            line = line.substr(match[0].length);
+            line = line.substring(match[0].length);
         }
         // Strip any comments
         line = line.split(this.commentRe, 1)[0];
@@ -193,14 +193,14 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         return !!this.hasOpcodeRe.test(line);
     }
 
-    labelFindFor(asmLines) {
+    labelFindFor(asmLines: string[]) {
         const isMips = _.any(asmLines, line => !!this.mipsLabelDefinition.test(line));
         return isMips ? this.labelFindMips : this.labelFindNonMips;
     }
 
-    findUsedLabels(asmLines, filterDirectives) {
-        const labelsUsed = {};
-        const weakUsages = {};
+    findUsedLabels(asmLines: string[], filterDirectives?: boolean) {
+        const labelsUsed: Record<string, boolean> = {};
+        const weakUsages: Record<string, Array<string>> = {};
         const labelFind = this.labelFindFor(asmLines);
         // The current label set is the set of labels all pointing at the current code, so:
         // foo:
@@ -291,7 +291,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         // Now follow the chains of used labels, marking any weak references they refer
         // to as also used. We iteratively do this until either no new labels are found,
         // or we hit a limit (only here to prevent a pathological case from hanging).
-        function markUsed(label) {
+        function markUsed(label: string) {
             labelsUsed[label] = true;
         }
 
@@ -311,15 +311,19 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         return labelsUsed;
     }
 
-    parseFiles(asmLines) {
-        const files = {};
+    parseFiles(asmLines: string[]) {
+        const files: Record<number, string> = {};
         for (const line of asmLines) {
             const match = line.match(this.fileFind);
             if (match) {
                 const lineNum = parseInt(match[1]);
                 if (match[4] && !line.includes('.cv_file')) {
                     // Clang-style file directive '.file X "dir" "filename"'
-                    files[lineNum] = match[2] + '/' + match[4];
+                    if (match[4].startsWith('/')) {
+                        files[lineNum] = match[4];
+                    } else {
+                        files[lineNum] = match[2] + '/' + match[4];
+                    }
                 } else {
                     files[lineNum] = match[2];
                 }
@@ -329,7 +333,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
     }
 
     // Remove labels which do not have a definition.
-    removeLabelsWithoutDefinition(asm, labelDefinitions) {
+    removeLabelsWithoutDefinition(asm: ParsedAsmResultLine[], labelDefinitions: Record<string, number>) {
         for (const obj of asm) {
             if (obj.labels) {
                 obj.labels = obj.labels.filter(label => labelDefinitions[label.name]);
@@ -338,7 +342,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
     }
 
     // Get labels which are used in the given line.
-    getUsedLabelsInLine(line) {
+    getUsedLabelsInLine(line: string): AsmResultLabel[] {
         const labelsInLine: AsmResultLabel[] = [];
 
         // Strip any comments
@@ -357,6 +361,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
                     endCol: startCol + label.length,
                 },
             });
+            return label;
         });
 
         return labelsInLine;
@@ -654,7 +659,15 @@ export class AsmParser extends AsmRegex implements IAsmParser {
             }
             if (match) {
                 // It's a label definition.
-                if (labelsUsed[match[1]] === undefined) {
+
+                // g-as shows local labels as eg: "1:  call  mcount". We characterize such a label as
+                // "the label-matching part doesn't equal the whole line" and treat it as used.
+                // As a special case, consider assignments of the form "symbol = ." to be labels.
+                if (
+                    labelsUsed[match[1]] === undefined &&
+                    match[0] === line &&
+                    (match[2] === undefined || match[2].trim() === '.')
+                ) {
                     // It's an unused label.
                     if (filters.labels) {
                         continue;
@@ -702,12 +715,12 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         return {
             asm: asm,
             labelDefinitions: labelDefinitions,
-            parsingTime: ((endTime - startTime) / BigInt(1000000)).toString(),
+            parsingTime: utils.deltaTimeNanoToMili(startTime, endTime),
             filteredCount: startingLineCount - asm.length,
         };
     }
 
-    fixLabelIndentation(line) {
+    fixLabelIndentation(line: string) {
         const match = line.match(this.indentedLabelDef);
         if (match) {
             return line.replace(/^\s+/, '');
@@ -716,7 +729,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         }
     }
 
-    isUserFunction(func) {
+    isUserFunction(func: string) {
         if (this.binaryHideFuncRe === null) return true;
 
         return !this.binaryHideFuncRe.test(func);
@@ -843,7 +856,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
                 const relocname = match.groups.relocname;
                 const relocdata = match.groups.relocdata;
                 // value/addend matched but not used yet.
-                const match_value = relocdata.match(this.relocDataSymNameRe);
+                // const match_value = relocdata.match(this.relocDataSymNameRe);
                 asm.push({
                     text: `   ${relocname} ${relocdata}`,
                     address: address,
@@ -858,7 +871,7 @@ export class AsmParser extends AsmRegex implements IAsmParser {
         return {
             asm: asm,
             labelDefinitions: labelDefinitions,
-            parsingTime: ((endTime - startTime) / BigInt(1000000)).toString(),
+            parsingTime: utils.deltaTimeNanoToMili(startTime, endTime),
             filteredCount: startingLineCount - asm.length,
         };
     }

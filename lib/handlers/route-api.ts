@@ -22,34 +22,43 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+import zlib from 'zlib';
+
 import express from 'express';
 
-import {assert, unwrap} from '../assert.js';
-import {ClientState} from '../clientstate.js';
-import {ClientStateGoldenifier, ClientStateNormalizer} from '../clientstate-normalizer.js';
+import {AppDefaultArguments, CompilerExplorerOptions} from '../../app.js';
 import {isString} from '../../shared/common-utils.js';
+import {Language} from '../../types/languages.interfaces.js';
+import {assert, unwrap} from '../assert.js';
+import {ClientStateGoldenifier, ClientStateNormalizer} from '../clientstate-normalizer.js';
+import {ClientState} from '../clientstate.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 import {logger} from '../logger.js';
+import {ClientOptionsHandler} from '../options-handler.js';
+import {PropertyGetter} from '../properties.interfaces.js';
+import {SentryCapture} from '../sentry.js';
+import {ExpandedShortLink} from '../storage/base.js';
 import {StorageBase} from '../storage/index.js';
 import * as utils from '../utils.js';
 
 import {ApiHandler} from './api.js';
-import {SentryCapture} from '../sentry.js';
-import {ExpandedShortLink} from '../storage/base.js';
+import {CompileHandler} from './compile.js';
 
 export type HandlerConfig = {
-    compileHandler: any;
-    clientOptionsHandler: any;
+    compileHandler: CompileHandler;
+    clientOptionsHandler: ClientOptionsHandler;
     storageHandler: StorageBase;
-    ceProps: any;
-    opts: any;
-    defArgs: any;
+    ceProps: PropertyGetter;
+    opts: CompilerExplorerOptions;
+    defArgs: AppDefaultArguments;
     renderConfig: any;
     renderGoldenLayout: any;
     staticHeaders: any;
     contentPolicyHeader: any;
+    compilationEnvironment: CompilationEnvironment;
 };
 
-type ShortLinkMetaData = {
+export type ShortLinkMetaData = {
     ogDescription?: string;
     ogAuthor?: string;
     ogTitle?: string;
@@ -76,6 +85,7 @@ export class RouteAPI {
                 config.ceProps,
                 config.storageHandler,
                 config.clientOptionsHandler.options.urlShortenService,
+                config.compilationEnvironment,
             );
 
             this.apiHandler.setReleaseInfo(config.defArgs.gitReleaseName, config.defArgs.releaseBuildNumber);
@@ -164,7 +174,7 @@ export class RouteAPI {
     }
 
     unstoredStateHandler(req: express.Request, res: express.Response) {
-        const state = JSON.parse(Buffer.from(req.params.clientstatebase64, 'base64').toString());
+        const state = extractJsonFromBufferAndInflateIfRequired(Buffer.from(req.params.clientstatebase64, 'base64'));
         const config = this.getGoldenLayoutFromClientState(new ClientState(state));
         const metadata = this.getMetaDataFromLink(req, null, config);
 
@@ -179,13 +189,18 @@ export class RouteAPI {
         assert(isString(req.query.code));
         session.source = req.query.code;
         const compiler = session.findOrCreateCompiler(1);
-        compiler.id = req.query.compiler;
-        compiler.options = req.query.compiler_flags || '';
+        compiler.id = req.query.compiler as string;
+        compiler.options = (req.query.compiler_flags as string) || '';
 
-        this.renderClientState(state, undefined, req, res);
+        this.renderClientState(state, null, req, res);
     }
 
-    renderClientState(clientstate: ClientState, metadata, req: express.Request, res: express.Response) {
+    renderClientState(
+        clientstate: ClientState,
+        metadata: ShortLinkMetaData | null,
+        req: express.Request,
+        res: express.Response,
+    ) {
         const config = this.getGoldenLayoutFromClientState(clientstate);
 
         this.renderGoldenLayout(config, metadata, req, res);
@@ -221,18 +236,18 @@ export class RouteAPI {
     }
 
     escapeLine(req: express.Request, line: string) {
-        return line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return line.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     }
 
-    filterCode(req: express.Request, code: string, lang) {
+    filterCode(req: express.Request, code: string, lang: Language) {
         let lines = code.split('\n');
         if (lang.previewFilter !== null) {
-            lines = lines.filter(line => !lang.previewFilter.test(line));
+            lines = lines.filter(line => !lang.previewFilter || !lang.previewFilter.test(line));
         }
         return lines.map(line => this.escapeLine(req, line)).join('\n');
     }
 
-    getMetaDataFromLink(req: express.Request, link: ExpandedShortLink | null, config) {
+    getMetaDataFromLink(req: express.Request, link: ExpandedShortLink | null, config: any) {
         const metadata: ShortLinkMetaData = {
             ogTitle: 'Compiler Explorer',
         };
@@ -248,7 +263,7 @@ export class RouteAPI {
         }
 
         if (!metadata.ogDescription) {
-            let lang;
+            let lang: Language | undefined;
             let source = '';
 
             const sources = utils.glGetMainContents(config.content);
@@ -303,5 +318,19 @@ export class RouteAPI {
         }
 
         return metadata;
+    }
+}
+
+export function extractJsonFromBufferAndInflateIfRequired(buffer: Buffer): any {
+    const firstByte = buffer.at(0); // for uncompressed data this is probably '{'
+    const isGzipUsed = firstByte !== undefined && (firstByte & 0x0f) === 0x8; // https://datatracker.ietf.org/doc/html/rfc1950, https://datatracker.ietf.org/doc/html/rfc1950, for '{' this yields 11
+    if (isGzipUsed) {
+        try {
+            return JSON.parse(zlib.inflateSync(buffer).toString());
+        } catch (_) {
+            return JSON.parse(buffer.toString());
+        }
+    } else {
+        return JSON.parse(buffer.toString());
     }
 }

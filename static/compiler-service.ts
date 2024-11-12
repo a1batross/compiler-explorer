@@ -38,6 +38,7 @@ import {CompilationResult, FiledataPair} from '../types/compilation/compilation.
 import {CompilationStatus} from './compiler-service.interfaces.js';
 import {IncludeDownloads, SourceAndFiles} from './download-service.js';
 import {SentryCapture} from './sentry.js';
+import {SiteSettings} from './settings.js';
 
 const ASCII_COLORS_RE = new RegExp(/\x1B\[[\d;]*m(.\[K)?/g);
 
@@ -61,7 +62,10 @@ export class CompilerService {
             this.compilersByLang[compiler.lang][compiler.id] = compiler;
         }
 
-        eventHub.on('settingsChange', newSettings => (this.allowStoreCodeDebug = newSettings.allowStoreCodeDebug));
+        eventHub.on(
+            'settingsChange',
+            (newSettings: SiteSettings) => (this.allowStoreCodeDebug = newSettings.allowStoreCodeDebug),
+        );
     }
 
     private getDefaultCompilerForLang(langId: string) {
@@ -133,16 +137,15 @@ export class CompilerService {
     }
 
     public getGroupsInUse(langId: string): {value: string; label: string}[] {
-        return _.chain(this.getCompilersForLang(langId))
-            .map((compiler: CompilerInfo) => compiler)
-            .uniq(false, compiler => compiler.group)
+        return _.uniq(Object.values(this.getCompilersForLang(langId) ?? {}), false, compiler => compiler.group)
             .map(compiler => {
                 return {value: compiler.group, label: compiler.groupName || compiler.group};
             })
-            .sort((a, b) => {
-                return a.label.localeCompare(b.label, undefined /* Ignore language */, {sensitivity: 'base'}) === 0;
-            })
-            .value();
+            .sort((a, b) =>
+                a.label.localeCompare(b.label, undefined /* Ignore language */, {
+                    sensitivity: 'base',
+                }),
+            );
     }
 
     getCompilersForLang(langId: string): Record<string, CompilerInfo> | undefined {
@@ -309,12 +312,6 @@ export class CompilerService {
                 },
             });
         });
-    }
-
-    private getFilenameFromUrl(url: string): string {
-        const jsurl = new URL(url);
-        const urlpath = jsurl.pathname;
-        return urlpath.substring(urlpath.lastIndexOf('/') + 1);
     }
 
     public async expandToFiles(source: string): Promise<SourceAndFiles> {

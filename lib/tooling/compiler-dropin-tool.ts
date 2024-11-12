@@ -22,13 +22,13 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-import _ from 'underscore';
-
-import {Library} from '../../types/libraries/libraries.interfaces.js';
-import {ToolResult} from '../../types/tool.interfaces.js';
+import {CompilationInfo} from '../../types/compilation/compilation.interfaces.js';
+import {ToolInfo, ToolResult} from '../../types/tool.interfaces.js';
+import {OptionsHandlerLibrary} from '../options-handler.js';
 import {getToolchainPath} from '../toolchain-utils.js';
 import * as utils from '../utils.js';
 
+import {ToolEnv} from './base-tool.interface.js';
 import {BaseTool} from './base-tool.js';
 
 export class CompilerDropinTool extends BaseTool {
@@ -36,17 +36,23 @@ export class CompilerDropinTool extends BaseTool {
         return 'compiler-dropin-tool';
     }
 
-    constructor(toolInfo, env) {
+    constructor(toolInfo: ToolInfo, env: ToolEnv) {
         super(toolInfo, env);
 
         this.addOptionsToToolArgs = false;
     }
 
-    getToolchainPath(compilationInfo): string | false {
+    getToolchainPath(compilationInfo: Record<any, any>): string | false {
         return getToolchainPath(compilationInfo.compiler.exe, compilationInfo.compiler.options);
     }
 
-    getOrderedArguments(compilationInfo, includeflags, libOptions, args, sourcefile): string[] | false {
+    getOrderedArguments(
+        compilationInfo: Record<any, any>,
+        includeflags: string[],
+        libOptions: string[],
+        args?: string[],
+        sourcefile?: string,
+    ): string[] | false {
         // order should be:
         //  1) options from the compiler config (compilationInfo.compiler.options)
         //  2) includes from the libraries (includeflags)
@@ -67,7 +73,7 @@ export class CompilerDropinTool extends BaseTool {
             compileFlags = compileFlags.concat(['--gcc-toolchain=' + toolchainPath]);
             compileFlags = compileFlags.concat(['--gcc-toolchain=' + toolchainPath]);
 
-            compilerOptions = _.filter(compilerOptions, option => {
+            compilerOptions = compilerOptions.filter(option => {
                 return !(option.indexOf('--gcc-toolchain=') === 0 || option.indexOf('--gxx-name=') === 0);
             });
         } else {
@@ -79,14 +85,14 @@ export class CompilerDropinTool extends BaseTool {
         compileFlags = compileFlags.concat(compilerOptions);
         compileFlags = compileFlags.concat(includeflags);
 
-        const manualCompileFlags = compilationInfo.options.filter(option => !argsToFilterOut.has(option));
+        const manualCompileFlags = compilationInfo.options.filter((option: string) => !argsToFilterOut.has(option));
         compileFlags = compileFlags.concat(manualCompileFlags);
         const toolOptions = this.tool.options || [];
         compileFlags = compileFlags.concat(toolOptions);
         compileFlags = compileFlags.concat(libOptions);
         compileFlags = compileFlags.concat(args || []);
 
-        const pathFilteredFlags: (string | false)[] = _.map(compileFlags, option => {
+        const pathFilteredFlags: (string | false)[] = compileFlags.map(option => {
             if (option && option.length > 1) {
                 if (option[0] === '/') {
                     return false;
@@ -96,15 +102,15 @@ export class CompilerDropinTool extends BaseTool {
             return option;
         });
 
-        return _.filter(pathFilteredFlags) as string[];
+        return pathFilteredFlags.filter(Boolean) as string[];
     }
 
     override async runTool(
-        compilationInfo: Record<any, any>,
+        compilationInfo: CompilationInfo,
         inputFilepath?: string,
         args?: string[],
         stdin?: string,
-        supportedLibraries?: Record<string, Library>,
+        supportedLibraries?: Record<string, OptionsHandlerLibrary>,
     ): Promise<ToolResult> {
         const sourcefile = inputFilepath;
 

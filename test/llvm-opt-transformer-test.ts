@@ -17,9 +17,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import * as stream from 'stream';
+import {describe, expect, it} from 'vitest';
 
-import {LLVMOptTransformer} from '../lib/llvm-opt-transformer.js';
+import {processRawOptRemarks} from '../lib/llvm-opt-transformer.js';
 
 describe('LLVM opt transformer', () => {
     it('should work', async () => {
@@ -42,16 +42,9 @@ Args:
   - String:          ' instructions in function'
 ...
 `;
-        const readString = new stream.PassThrough();
-        readString.push(doc);
-        readString.end();
-        const optStream = readString.pipe(new LLVMOptTransformer());
 
-        const output: object[] = [];
-        for await (const opt of optStream) {
-            output.push(opt);
-        }
-        output.should.deep.equal([
+        const output: object[] = processRawOptRemarks(doc);
+        expect(output).toEqual([
             {
                 Args: [
                     {

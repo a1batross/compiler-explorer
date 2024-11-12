@@ -28,6 +28,11 @@ import type {Level, Sponsor, Sponsors} from './sponsors.interfaces.js';
 
 export function parse(mapOrString: Record<string, any> | string): Sponsor {
     if (typeof mapOrString == 'string') mapOrString = {name: mapOrString};
+    const displayType = mapOrString.displayType || 'Above';
+    const style: Record<string, string> = {};
+    if (mapOrString.bgColour) {
+        style['background-color'] = mapOrString.bgColour;
+    }
     return {
         name: mapOrString.name,
         description: typeof mapOrString.description === 'string' ? [mapOrString.description] : mapOrString.description,
@@ -37,9 +42,10 @@ export function parse(mapOrString: Record<string, any> | string): Sponsor {
         icon: mapOrString.icon || mapOrString.img,
         icon_dark: mapOrString.icon_dark,
         topIconShowEvery: mapOrString.topIconShowEvery || 0,
-        sideBySide: !!mapOrString.sideBySide,
+        displayType: displayType,
         priority: mapOrString.priority || 0,
         statsId: mapOrString.statsId,
+        style: style,
     };
 }
 
@@ -122,7 +128,7 @@ class SponsorsImpl implements Sponsors {
     private readonly _iconSets: Sponsor[][];
     private _nextSet: number;
 
-    constructor(levels: Level[], maxTopIcons) {
+    constructor(levels: Level[], maxTopIcons: number) {
         this._levels = levels;
         this._icons = [];
         for (const level of levels) {

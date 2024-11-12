@@ -23,13 +23,14 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 import {
-    LLVMOptPipelineBackendOptions,
-    LLVMOptPipelineResults,
+    OptPipelineBackendOptions,
+    OptPipelineResults,
     Pass,
-} from '../../types/compilation/llvm-opt-pipeline-output.interfaces.js';
+} from '../../types/compilation/opt-pipeline-output.interfaces.js';
 import {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
 import {ResultLine} from '../../types/resultline/resultline.interfaces.js';
 import {assert} from '../assert.js';
+import {PropertyGetter} from '../properties.interfaces.js';
 
 // Note(jeremy-rifkin):
 // For now this filters out a bunch of metadata we aren't interested in
@@ -73,13 +74,15 @@ export class LlvmPassDumpParser {
     metadataLineFilters: RegExp[];
     irDumpHeader: RegExp;
     machineCodeDumpHeader: RegExp;
+    cirDumpHeader: RegExp;
     functionDefine: RegExp;
     machineFunctionBegin: RegExp;
     functionEnd: RegExp;
+    machineFunctionEnd: RegExp;
     //label: RegExp;
     //instruction: RegExp;
 
-    constructor(compilerProps) {
+    constructor(compilerProps: PropertyGetter) {
         //this.maxIrLines = 5000;
         //if (compilerProps) {
         //    this.maxIrLines = compilerProps('maxLinesOfAsm', this.maxIrLines);
@@ -98,7 +101,8 @@ export class LlvmPassDumpParser {
 
         // Additional filters conditionally enabled by `filterDebugInfo`
         this.debugInfoFilters = [
-            /^\s+call void @llvm.dbg.+$/, // dbg calls
+            /^\s+(tail\s)?call void @llvm\.dbg.+$/, // dbg calls
+            /^\s+#dbg_.+$/, // dbg records
             /^\s+DBG_.+$/, // dbg pseudo-instructions
             /^(!\d+) = (?:distinct )?!DI([A-Za-z]+)\(([^)]+?)\)/, // meta
             /^(!\d+) = (?:distinct )?!{.*}/, // meta
@@ -119,6 +123,10 @@ export class LlvmPassDumpParser {
         // or "(loop: %x)" at the end
         this.irDumpHeader = /^;?\s?\*{3} (.+) \*{3}(?:\s+\((?:function: |loop: )(%?[\w$.]+)\))?(?:;.+)?$/;
         this.machineCodeDumpHeader = /^# \*{3} (.+) \*{3}:$/;
+        // ClangIr dump headers look like "// -----// IR Dump Before XYZ (cir-xyz) //----- //
+        // and currently do not refer to functions
+        this.cirDumpHeader = /^\/\/ -----\/\/ (.+) \/\/----- \/\/$/;
+
         // Ir dumps are "define T @_Z3fooi(...) . .. {" or "# Machine code for function _Z3fooi: <attributes>"
         // Some interesting edge cases found when testing:
         // `define internal %"struct.libassert::detail::assert_static_parameters"* @"_ZZ4mainENK3$_0clEv"(
@@ -126,8 +134,10 @@ export class LlvmPassDumpParser {
         // `define internal void @__cxx_global_var_init.1() #0 section ".text.startup" {`
         this.functionDefine = /^define .+ @([\w.]+|"[^"]+")\(.+$/;
         this.machineFunctionBegin = /^# Machine code for function ([\w$.]+):.*$/;
-        // Functions end with either a closing brace or "# End machine code for function _Z3fooi."
-        this.functionEnd = /^(?:}|# End machine code for function ([\w$.]+).)$/;
+        // IR Functions end with either a closing brace
+        this.functionEnd = /^}$/;
+        // Machine functions end like "# End machine code for function _Z3fooi."
+        this.machineFunctionEnd = /^# End machine code for function ([\w$.]+).$/;
         // Either "123:" with a possible comment or something like "bb.3 (%ir-block.13):"
         //this.label = /^(?:\d+:(\s+;.+)?|\w+.+:)$/;
         //this.instruction = /^\s+.+$/;
@@ -145,7 +155,8 @@ export class LlvmPassDumpParser {
             //}
             const irMatch = line.text.match(this.irDumpHeader);
             const machineMatch = line.text.match(this.machineCodeDumpHeader);
-            const header = irMatch || machineMatch;
+            const cirMatch = line.text.match(this.cirDumpHeader);
+            const header = irMatch || machineMatch || cirMatch;
             if (header) {
                 if (pass !== null) {
                     raw_passes.push(pass);
@@ -194,6 +205,7 @@ export class LlvmPassDumpParser {
             name: string;
             lines: ResultLine[];
         } | null = null;
+        let isMachineFunctionOpen: boolean = false;
         for (const line of dump.lines) {
             const irFnMatch = line.text.match(this.functionDefine);
             const machineFnMatch = line.text.match(this.machineFunctionBegin);
@@ -206,6 +218,7 @@ export class LlvmPassDumpParser {
                     name: (irFnMatch || machineFnMatch)![1],
                     lines: [line], // include the current line
                 };
+                isMachineFunctionOpen = !!machineFnMatch;
             } else if (line.text.startsWith('; Preheader:')) {
                 // loop dump
                 // every line in this dump should be part of the loop, exit condition will be end of the for loop
@@ -216,7 +229,10 @@ export class LlvmPassDumpParser {
                 };
             } else {
                 // close function
-                if (this.functionEnd.test(line.text.trim())) {
+                if (
+                    (!isMachineFunctionOpen && this.functionEnd.test(line.text.trim())) ||
+                    (isMachineFunctionOpen && this.machineFunctionEnd.test(line.text.trim()))
+                ) {
                     // if not currently in a function
                     assert(func);
                     const {name, lines} = func;
@@ -345,7 +361,7 @@ export class LlvmPassDumpParser {
     matchPassDumps(passDumpsByFunction: Record<string, PassDump[]>) {
         // We have all the passes for each function, now we will go through each function and match the before/after
         // dumps
-        const final_output: LLVMOptPipelineResults = {};
+        const final_output: OptPipelineResults = {};
         for (const [function_name, passDumps] of Object.entries(passDumpsByFunction)) {
             // I had a fantastic chunk2 method to iterate the passes in chunks of 2 but I've been foiled by an edge
             // case: At least the "Delete dead loops" may only print a before dump and no after dump
@@ -414,10 +430,10 @@ export class LlvmPassDumpParser {
         return final_output;
     }
 
-    breakdownOutput(ir: ResultLine[], llvmOptPipelineOptions: LLVMOptPipelineBackendOptions) {
+    breakdownOutput(ir: ResultLine[], optPipelineOptions: OptPipelineBackendOptions) {
         // break down output by "*** IR Dump After XYZ ***" markers
         const raw_passes = this.breakdownOutputIntoPassDumps(ir);
-        if (llvmOptPipelineOptions.fullModule) {
+        if (optPipelineOptions.fullModule) {
             const passDumpsByFunction = this.associateFullDumpsWithFunctions(raw_passes);
             // Match before / after pass dumps and we're done
             return this.matchPassDumps(passDumpsByFunction);
@@ -432,15 +448,15 @@ export class LlvmPassDumpParser {
         }
     }
 
-    applyIrFilters(ir: ResultLine[], llvmOptPipelineOptions: LLVMOptPipelineBackendOptions) {
+    applyIrFilters(ir: ResultLine[], optPipelineOptions: OptPipelineBackendOptions) {
         // Additional filters conditionally enabled by `filterDebugInfo`/`filterIRMetadata`
         let filters = this.filters;
         let lineFilters = this.lineFilters;
-        if (llvmOptPipelineOptions.filterDebugInfo) {
+        if (optPipelineOptions.filterDebugInfo) {
             filters = filters.concat(this.debugInfoFilters);
             lineFilters = lineFilters.concat(this.debugInfoLineFilters);
         }
-        if (llvmOptPipelineOptions.filterIRMetadata) {
+        if (optPipelineOptions.filterIRMetadata) {
             lineFilters = lineFilters.concat(this.metadataLineFilters);
         }
 
@@ -469,16 +485,17 @@ export class LlvmPassDumpParser {
         );
     }
 
-    process(
-        output: ResultLine[],
-        _: ParseFiltersAndOutputOptions,
-        llvmOptPipelineOptions: LLVMOptPipelineBackendOptions,
-    ) {
+    process(output: ResultLine[], _: ParseFiltersAndOutputOptions, optPipelineOptions: OptPipelineBackendOptions) {
         // Crop out any junk before the pass dumps (e.g. warnings)
         const ir = output.slice(
-            output.findIndex(line => line.text.match(this.irDumpHeader) || line.text.match(this.machineCodeDumpHeader)),
+            output.findIndex(
+                line =>
+                    this.irDumpHeader.test(line.text) ||
+                    this.machineCodeDumpHeader.test(line.text) ||
+                    this.cirDumpHeader.test(line.text),
+            ),
         );
-        const preprocessed_lines = this.applyIrFilters(ir, llvmOptPipelineOptions);
-        return this.breakdownOutput(preprocessed_lines, llvmOptPipelineOptions);
+        const preprocessed_lines = this.applyIrFilters(ir, optPipelineOptions);
+        return this.breakdownOutput(preprocessed_lines, optPipelineOptions);
     }
 }

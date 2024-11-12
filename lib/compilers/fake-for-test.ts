@@ -24,7 +24,10 @@
 
 import _ from 'underscore';
 
-import type {ICompiler} from '../../types/compiler.interfaces.js';
+import {BypassCache, ExecutionParams, FiledataPair} from '../../types/compilation/compilation.interfaces.js';
+import type {ICompiler, PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
+import {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
+import {SelectedLibraryVersion} from '../../types/libraries/libraries.interfaces.js';
 import {CompilerArguments} from '../compiler-arguments.js';
 
 export class FakeCompiler implements ICompiler {
@@ -37,7 +40,7 @@ export class FakeCompiler implements ICompiler {
         return 'fake-for-test';
     }
 
-    constructor(info) {
+    constructor(info: Partial<PreliminaryCompilerInfo>) {
         this.compiler = Object.assign(
             {
                 id: 'fake-for-test',
@@ -53,6 +56,7 @@ export class FakeCompiler implements ICompiler {
 
     initialise(mtime: Date, clientOptions: any, isPrediscovered: boolean) {
         throw new Error('Method not implemented.');
+        return Promise.resolve(null);
     }
 
     getInfo() {
@@ -63,27 +67,39 @@ export class FakeCompiler implements ICompiler {
         return {};
     }
 
+    getDefaultExecOptions() {
+        return {};
+    }
+
     getRemote() {
         return null;
     }
 
-    compile(source, options, backendOptions, filters, bypassCache, tools, executionParameters, libraries, files) {
+    compile(
+        source: string,
+        options: string[],
+        backendOptions: Record<string, any>,
+        filters: ParseFiltersAndOutputOptions,
+        bypassCache: BypassCache,
+        tools,
+        executeParameters: ExecutionParams,
+        libraries: SelectedLibraryVersion[],
+        files?: FiledataPair[],
+    ) {
         const inputBody = {
             input: {
                 source: source,
                 options: options,
                 backendOptions: backendOptions,
                 filters: filters,
-                files: undefined,
+                files: files,
             },
         };
-
-        if (files) inputBody.input.files = files;
 
         return Promise.resolve(_.extend(this.info.fakeResult || {}, inputBody));
     }
 
-    cmake(files, options) {
+    cmake(files: FiledataPair[], options: string[]) {
         return Promise.resolve(
             _.extend(this.info.fakeResult || {}, {
                 input: {

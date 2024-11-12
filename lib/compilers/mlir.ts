@@ -27,6 +27,7 @@ import path from 'path';
 import type {PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
 import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
 import {BaseCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 
 import {BaseParser} from './argument-parsers.js';
 
@@ -35,7 +36,7 @@ export class MLIRCompiler extends BaseCompiler {
         return 'mlir';
     }
 
-    constructor(compilerInfo: PreliminaryCompilerInfo, env) {
+    constructor(compilerInfo: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(
             {
                 disabledFilters: [
@@ -56,7 +57,7 @@ export class MLIRCompiler extends BaseCompiler {
         );
     }
 
-    override getCompilerResultLanguageId() {
+    override getCompilerResultLanguageId(filters?: ParseFiltersAndOutputOptions): string | undefined {
         return 'mlir';
     }
 
@@ -68,7 +69,7 @@ export class MLIRCompiler extends BaseCompiler {
         return ['-o', outputFilename];
     }
 
-    override getArgumentParser(): any {
+    override getArgumentParserClass(): any {
         return BaseParser;
     }
 
@@ -80,7 +81,7 @@ export class MLIRCompiler extends BaseCompiler {
         return [];
     }
 
-    override async processAsm(result, filters, options) {
+    override async processAsm(result, filters: ParseFiltersAndOutputOptions, options: string[]) {
         // at some point maybe a custom parser can be written, for now just don't filter anything
         return super.processAsm(
             result,

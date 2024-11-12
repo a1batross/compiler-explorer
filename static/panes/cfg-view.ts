@@ -32,7 +32,6 @@ import {CfgState} from './cfg-view.interfaces.js';
 import {Hub} from '../hub.js';
 import {Container} from 'golden-layout';
 import {PaneState} from './pane.interfaces.js';
-import {ga} from '../analytics.js';
 import * as utils from '../utils.js';
 
 import {
@@ -177,8 +176,14 @@ export class Cfg extends Pane<CfgState> {
             dropdownParent: 'body',
             plugins: ['dropdown_input'],
             sortField: 'title',
-            onChange: e => this.selectFunction(e as unknown as string),
+            onChange: (e: string) => this.selectFunction(e),
         });
+        this.functionSelector.on('dropdown_close', () => {
+            // scroll back to the selection on the next open
+            const selection = unwrap(this.functionSelector).getOption(this.state.selectedFunction);
+            unwrap(this.functionSelector).setActiveOption(selection);
+        });
+
         this.resetViewButton = this.domRoot.find('.reset-view');
         this.resetViewButton.on('click', () => {
             this.resetView(true);
@@ -186,14 +191,6 @@ export class Cfg extends Pane<CfgState> {
         this.zoomOutButton = this.domRoot.find('.zoom-out');
         this.zoomOutButton.on('click', () => {
             this.birdsEyeView();
-        });
-    }
-
-    override registerOpeningAnalyticsEvent(): void {
-        ga.proxy('send', {
-            hitType: 'event',
-            eventCategory: 'OpenViewPane',
-            eventAction: 'CFGViewPane',
         });
     }
 
@@ -311,7 +308,7 @@ export class Cfg extends Pane<CfgState> {
         this.compilerInfo.editorId = editorId;
         this.compilerInfo.treeId = treeId;
         this.updateTitle();
-        if (compiler && !compiler.supportsLLVMOptPipelineView) {
+        if (compiler && !compiler.optPipeline) {
             //this.editor.setValue('<LLVM IR output is not supported for this compiler>');
         }
     }

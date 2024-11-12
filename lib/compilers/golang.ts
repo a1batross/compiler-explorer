@@ -29,6 +29,7 @@ import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.in
 import type {ResultLine} from '../../types/resultline/resultline.interfaces.js';
 import {unwrap} from '../assert.js';
 import {BaseCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 import * as utils from '../utils.js';
 
 import {GolangParser} from './argument-parsers.js';
@@ -58,7 +59,7 @@ export class GolangCompiler extends BaseCompiler {
         return 'golang';
     }
 
-    constructor(compilerInfo: PreliminaryCompilerInfo, env) {
+    constructor(compilerInfo: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(compilerInfo, env);
         const group = this.compiler.group;
 
@@ -66,7 +67,8 @@ export class GolangCompiler extends BaseCompiler {
             'goroot',
             this.compilerProps<string | undefined>(`group.${group}.goroot`),
         );
-        const goarch = this.compilerProps<string | undefined>(
+        // GOARCH can be something like '386' which is read out as a number.
+        const goarch = this.compilerProps<string | number | undefined>(
             'goarch',
             this.compilerProps<string | undefined>(`group.${group}.goarch`),
         );
@@ -80,7 +82,7 @@ export class GolangCompiler extends BaseCompiler {
             this.GOENV.GOROOT = goroot;
         }
         if (goarch) {
-            this.GOENV.GOARCH = goarch;
+            this.GOENV.GOARCH = goarch.toString();
         }
         if (goos) {
             this.GOENV.GOOS = goos;
@@ -124,7 +126,7 @@ export class GolangCompiler extends BaseCompiler {
             match = line.match(FUNC_RE);
             if (match) {
                 // Normalize function name.
-                func = match[1].replace(/[()*.]+/g, '_');
+                func = match[1].replaceAll(/[()*.]+/g, '_');
 
                 // It's possible for normalized function names to collide.
                 // Keep a count of collisions per function name. Labels get
@@ -226,7 +228,7 @@ export class GolangCompiler extends BaseCompiler {
         result.asm = this.convertNewGoL(out);
         result.stderr = [];
         result.stdout = utils.parseOutput(logging, result.inputFilename);
-        return Promise.all([result, '', '']);
+        return Promise.all([result, [], []]);
     }
 
     override getSharedLibraryPathsAsArguments() {
@@ -268,7 +270,12 @@ export class GolangCompiler extends BaseCompiler {
         return options;
     }
 
-    override getArgumentParser(): any {
+    override getArgumentParserClass(): any {
         return GolangParser;
+    }
+
+    override isCfgCompiler() {
+        // #6439: `gccgo` is ok, the default go compiler `gc` isn't
+        return !this.compiler.version.includes('go version');
     }
 }

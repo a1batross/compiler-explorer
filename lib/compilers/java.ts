@@ -25,20 +25,22 @@
 import path from 'path';
 
 import fs from 'fs-extra';
+import Semver from 'semver';
 
 import type {ParsedAsmResult, ParsedAsmResultLine} from '../../types/asmresult/asmresult.interfaces.js';
+import {BypassCache, CacheKey, CompilationResult} from '../../types/compilation/compilation.interfaces.js';
 import type {PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
+import {ExecutableExecutionOptions} from '../../types/execution/execution.interfaces.js';
 import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
-import {unwrap} from '../assert.js';
-import {BaseCompiler} from '../base-compiler.js';
+import {assert, unwrap} from '../assert.js';
+import {BaseCompiler, SimpleOutputFilenameCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 import {logger} from '../logger.js';
 import * as utils from '../utils.js';
 
 import {JavaParser} from './argument-parsers.js';
-import {BypassCache} from '../../types/compilation/compilation.interfaces.js';
-import {ExecutableExecutionOptions} from '../../types/execution/execution.interfaces.js';
 
-export class JavaCompiler extends BaseCompiler {
+export class JavaCompiler extends BaseCompiler implements SimpleOutputFilenameCompiler {
     static get key() {
         return 'java';
     }
@@ -46,7 +48,7 @@ export class JavaCompiler extends BaseCompiler {
     javaRuntime: string;
     mainRegex: RegExp;
 
-    constructor(compilerInfo: PreliminaryCompilerInfo, env) {
+    constructor(compilerInfo: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(
             {
                 // Default is to disable all "cosmetic" filters
@@ -63,7 +65,7 @@ export class JavaCompiler extends BaseCompiler {
         return [];
     }
 
-    override async objdump(outputFilename, result: any, maxSize: number) {
+    override async objdump(outputFilename: string, result: any, maxSize: number) {
         const dirPath = path.dirname(outputFilename);
         const files = await fs.readdir(dirPath);
         logger.verbose('Class files: ', files);
@@ -129,15 +131,24 @@ export class JavaCompiler extends BaseCompiler {
         return ['-Xlint:all', '-encoding', 'utf8'];
     }
 
-    override async handleInterpreting(key, executeParameters: ExecutableExecutionOptions) {
-        const compileResult = await this.getOrBuildExecutable(key, BypassCache.None);
+    override async handleInterpreting(
+        key: CacheKey,
+        executeParameters: ExecutableExecutionOptions,
+    ): Promise<CompilationResult> {
+        const executionPackageHash = this.env.getExecutableHash(key);
+        const compileResult = await this.getOrBuildExecutable(key, BypassCache.None, executionPackageHash);
         if (compileResult.code === 0) {
+            const extraXXFlags: string[] = [];
+            if (Semver.gte(utils.asSafeVer(this.compiler.semver), '11.0.0', true)) {
+                extraXXFlags.push('-XX:-UseDynamicNumberOfCompilerThreads');
+            }
+            assert(compileResult.dirPath !== undefined);
             executeParameters.args = [
                 '-Xss136K', // Reduce thread stack size
                 '-XX:CICompilerCount=2', // Reduce JIT compilation threads. 2 is minimum
-                '-XX:-UseDynamicNumberOfCompilerThreads',
                 '-XX:-UseDynamicNumberOfGCThreads',
                 '-XX:+UseSerialGC', // Disable parallell/concurrent garbage collector
+                ...extraXXFlags,
                 await this.getMainClassName(compileResult.dirPath),
                 '-cp',
                 compileResult.dirPath,
@@ -194,7 +205,7 @@ export class JavaCompiler extends BaseCompiler {
         return 'Main';
     }
 
-    override getArgumentParser() {
+    override getArgumentParserClass() {
         return JavaParser;
     }
 
@@ -239,10 +250,10 @@ export class JavaCompiler extends BaseCompiler {
         return this.filterUserOptionsWithArg(userOptions, oneArgForbiddenList);
     }
 
-    override async processAsm(result) {
+    override async processAsm(result): Promise<ParsedAsmResult> {
         // Handle "error" documents.
         if (!result.asm.includes('\n') && result.asm[0] === '<') {
-            return [{text: result.asm, source: null}];
+            return {asm: [{text: result.asm, source: null}]};
         }
 
         // result.asm is an array of javap stdouts
@@ -283,7 +294,7 @@ export class JavaCompiler extends BaseCompiler {
         return {asm: segments};
     }
 
-    parseAsmForClass(javapOut) {
+    parseAsmForClass(javapOut: string) {
         const textsBeforeMethod: string[] = [];
         const methods: {instructions: any[]; startLine?: number}[] = [];
         // javap output puts `    Code:` after every signature. (Line will not be shown to user)
@@ -304,8 +315,11 @@ export class JavaCompiler extends BaseCompiler {
             for (const codeLineCandidate of utils.splitLines(codeAndLineNumberTable)) {
                 // Match
                 //       1: invokespecial #1                  // Method java/lang/Object."<init>":()V
-                // Or match the "default: <code>" block inside a lookupswitch instruction
-                const match = codeLineCandidate.match(/\s+(\d+|default): (.*)/);
+                // Or match lines inside inside a lookupswitch instruction like:
+                //         8: <code>
+                //        -1: <code>
+                //   default: <code>
+                const match = codeLineCandidate.match(/\s+([\d-]+|default): (.*)/);
                 if (match) {
                     const instrOffset = Number.parseInt(match[1]);
                     method.instructions.push({
@@ -379,7 +393,7 @@ export class JavaCompiler extends BaseCompiler {
             if (lastIndex !== -1) {
                 // Get "interesting" text after the LineNumbers table (header of next method/tail of file)
                 // trimRight() because of trailing \r on Windows
-                textsBeforeMethod.push(codeAndLineNumberTable.substr(lastIndex).trimEnd());
+                textsBeforeMethod.push(codeAndLineNumberTable.substring(lastIndex).trimEnd());
             }
 
             if (currentSourceLine !== -1) {

@@ -44,7 +44,7 @@ export class TinyCCompiler extends BaseCompiler {
         }
     }
 
-    override filterUserOptions(userOptions) {
-        return _.filter(userOptions, opt => opt !== '-run');
+    override filterUserOptions(userOptions: string[]) {
+        return userOptions.filter(opt => opt !== '-run');
     }
 }

@@ -26,23 +26,25 @@ import bodyParser from 'body-parser';
 import express from 'express';
 import _ from 'underscore';
 
+import {isString, unique} from '../../shared/common-utils.js';
 import {CompilerInfo} from '../../types/compiler.interfaces.js';
 import {Language, LanguageKey} from '../../types/languages.interfaces.js';
 import {assert, unwrap} from '../assert.js';
 import {ClientStateNormalizer} from '../clientstate-normalizer.js';
-import {isString, unique} from '../../shared/common-utils.js';
+import {CompilationEnvironment} from '../compilation-env.js';
+import {IExecutionEnvironment} from '../execution/execution-env.interfaces.js';
+import {LocalExecutionEnvironment} from '../execution/index.js';
 import {logger} from '../logger.js';
 import {ClientOptionsHandler} from '../options-handler.js';
 import {PropertyGetter} from '../properties.interfaces.js';
+import {SentryCapture} from '../sentry.js';
 import {BaseShortener, getShortenerTypeByKey} from '../shortener/index.js';
 import {StorageBase} from '../storage/index.js';
-import * as utils from '../utils.js';
 
 import {withAssemblyDocumentationProviders} from './assembly-documentation.js';
 import {CompileHandler} from './compile.js';
 import {FormattingHandler} from './formatting.js';
 import {getSiteTemplates} from './site-templates.js';
-import {SentryCapture} from '../sentry.js';
 
 function methodNotAllowed(req: express.Request, res: express.Response) {
     res.send('Method Not Allowed');
@@ -60,14 +62,17 @@ export class ApiHandler {
         gitReleaseName: '',
         releaseBuildNumber: '',
     };
+    private readonly compilationEnvironment: CompilationEnvironment;
 
     constructor(
         compileHandler: CompileHandler,
         ceProps: PropertyGetter,
         private readonly storageHandler: StorageBase,
         urlShortenService: string,
+        compilationEnvironment: CompilationEnvironment,
     ) {
         this.handle = express.Router();
+        this.compilationEnvironment = compilationEnvironment;
         const cacheHeader = `public, max-age=${ceProps('apiMaxAgeSecs', 24 * 60 * 60)}`;
         this.handle.use((req, res, next) => {
             res.header({
@@ -106,6 +111,10 @@ export class ApiHandler {
             .route('/compiler/:compiler/cmake')
             .post(compileHandler.handleCmake.bind(compileHandler))
             .all(methodNotAllowed);
+
+        if (this.compilationEnvironment.ceProps('localexecutionEndpoint', false)) {
+            this.handle.route('/localexecution/:hash').post(this.handleLocalExecution.bind(this)).all(methodNotAllowed);
+        }
 
         this.handle
             .route('/popularArguments/:compiler')
@@ -228,12 +237,10 @@ export class ApiHandler {
                 .concat([title])
                 .map(item => item.length),
         );
+        const header = title.padEnd(maxLength, ' ') + ' | Name\n';
+        const body = list.map(lang => lang.id.padEnd(maxLength, ' ') + ' | ' + lang.name).join('\n');
         res.set('Content-Type', 'text/plain');
-        res.send(
-            utils.padRight(title, maxLength) +
-                ' | Name\n' +
-                list.map(lang => utils.padRight(lang.id, maxLength) + ' | ' + lang.name).join('\n'),
-        );
+        res.send(header + body);
     }
 
     getLibrariesAsArray(languageId: LanguageKey) {
@@ -274,6 +281,29 @@ export class ApiHandler {
                 statusCode: 500,
                 message: 'Internal error',
             });
+        }
+    }
+
+    async handleLocalExecution(req: express.Request, res: express.Response, next: express.NextFunction) {
+        if (!req.params.hash) {
+            next({statusCode: 404, message: 'No hash supplied'});
+            return;
+        }
+
+        if (!req.body.ExecutionParams) {
+            next({statusCode: 404, message: 'No ExecutionParams'});
+            return;
+        }
+
+        try {
+            const env: IExecutionEnvironment = new LocalExecutionEnvironment(this.compilationEnvironment);
+            await env.downloadExecutablePackage(req.params.hash);
+            const execResult = await env.execute(req.body.ExecutionParams);
+            logger.debug('execResult', execResult);
+            res.send(execResult);
+        } catch (e) {
+            logger.error(e);
+            next({statusCode: 500, message: 'Internal error'});
         }
     }
 

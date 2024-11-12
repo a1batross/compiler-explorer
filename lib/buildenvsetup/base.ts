@@ -26,11 +26,21 @@ import path from 'path';
 
 import _ from 'underscore';
 
+import {Arch, CacheKey, ExecutionOptionsWithEnv} from '../../types/compilation/compilation.interfaces.js';
+import {CompilerInfo} from '../../types/compiler.interfaces.js';
+import {UnprocessedExecResult} from '../../types/execution/execution.interfaces.js';
+import {CompilationEnvironment} from '../compilation-env.js';
 import {logger} from '../logger.js';
+import {VersionInfo} from '../options-handler.js';
 import * as utils from '../utils.js';
 
 import type {BuildEnvDownloadInfo} from './buildenv.interfaces.js';
-import {LibraryVersion} from '../../types/libraries/libraries.interfaces.js';
+
+export type ExecCompilerCachedFunc = (
+    compiler: string,
+    args: string[],
+    options?: ExecutionOptionsWithEnv,
+) => Promise<UnprocessedExecResult>;
 
 export class BuildEnvSetupBase {
     protected compiler: any;
@@ -39,8 +49,9 @@ export class BuildEnvSetupBase {
     public compilerArch: string | false;
     protected compilerTypeOrGCC: any;
     public compilerSupportsX86: boolean;
+    public defaultLibCxx: string;
 
-    constructor(compilerInfo, env) {
+    constructor(compilerInfo: CompilerInfo, env: CompilationEnvironment) {
         this.compiler = compilerInfo;
         this.env = env;
 
@@ -49,9 +60,10 @@ export class BuildEnvSetupBase {
         this.compilerTypeOrGCC = compilerInfo.compilerType || 'gcc';
         if (this.compilerTypeOrGCC === 'clang-intel') this.compilerTypeOrGCC = 'gcc';
         this.compilerSupportsX86 = !this.compilerArch;
+        this.defaultLibCxx = 'libstdc++';
     }
 
-    async initialise(execCompilerCachedFunc) {
+    async initialise(execCompilerCachedFunc: ExecCompilerCachedFunc) {
         if (this.compilerArch) return;
         await this.hasSupportForArch(execCompilerCachedFunc, 'x86')
             .then(res => (this.compilerSupportsX86 = res))
@@ -61,9 +73,9 @@ export class BuildEnvSetupBase {
             });
     }
 
-    async hasSupportForArch(execCompilerCached, arch) {
+    async hasSupportForArch(execCompilerCached: ExecCompilerCachedFunc, arch: Arch): Promise<boolean> {
         let result: any;
-        let searchFor = arch;
+        let searchFor = arch as string;
         if (this.compiler.exe.includes('icpx')) {
             return arch === 'x86' || arch === 'x86_64';
         } else if (this.compiler.exe.includes('circle')) {
@@ -97,9 +109,9 @@ export class BuildEnvSetupBase {
     }
 
     async setup(
-        key,
+        key: CacheKey,
         dirPath: string,
-        selectedLibraries: Record<string, LibraryVersion>,
+        selectedLibraries: Record<string, VersionInfo>,
         binary: boolean,
     ): Promise<BuildEnvDownloadInfo[]> {
         return [];
@@ -141,7 +153,7 @@ export class BuildEnvSetupBase {
         return false;
     }
 
-    getLibcxx(key) {
+    getLibcxx(key: CacheKey): string {
         const match = this.compiler.options.match(/-stdlib=(\S*)/i);
         if (match) {
             return match[1];
@@ -154,11 +166,11 @@ export class BuildEnvSetupBase {
                 return stdlibOption.substring(8);
             }
 
-            return 'libstdc++';
+            return this.defaultLibCxx;
         }
     }
 
-    getTarget(key): string {
+    getTarget(key: CacheKey): string {
         if (!this.compilerSupportsX86) return '';
         if (this.compilerArch) return this.compilerArch;
 
@@ -177,7 +189,7 @@ export class BuildEnvSetupBase {
         return 'x86_64';
     }
 
-    hasBinariesToLink(details: LibraryVersion) {
+    hasBinariesToLink(details: VersionInfo) {
         return (
             details.libpath.length === 0 &&
             (details.staticliblink.length > 0 || details.liblink.length > 0) &&
@@ -185,11 +197,11 @@ export class BuildEnvSetupBase {
         );
     }
 
-    hasPackagedHeaders(details: LibraryVersion) {
+    hasPackagedHeaders(details: VersionInfo) {
         return !!details.packagedheaders;
     }
 
-    shouldDownloadPackage(details: LibraryVersion) {
+    shouldDownloadPackage(details: VersionInfo) {
         return this.hasPackagedHeaders(details) || this.hasBinariesToLink(details);
     }
 }

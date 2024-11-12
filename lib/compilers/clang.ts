@@ -27,16 +27,28 @@ import path from 'path';
 
 import _ from 'underscore';
 
-import type {BypassCache, CompilationResult, ExecutionOptions} from '../../types/compilation/compilation.interfaces.js';
+import type {
+    ActiveTool,
+    BuildResult,
+    BypassCache,
+    CacheKey,
+    CompilationInfo,
+    CompilationResult,
+    ExecutionOptionsWithEnv,
+} from '../../types/compilation/compilation.interfaces.js';
 import type {PreliminaryCompilerInfo} from '../../types/compiler.interfaces.js';
 import type {ExecutableExecutionOptions, UnprocessedExecResult} from '../../types/execution/execution.interfaces.js';
 import type {ParseFiltersAndOutputOptions} from '../../types/features/filters.interfaces.js';
-import {BaseCompiler} from '../base-compiler.js';
-import {AmdgpuAsmParser} from '../parsers/asm-parser-amdgpu.js';
-import {SassAsmParser} from '../parsers/asm-parser-sass.js';
-import {HexagonAsmParser} from '../parsers/asm-parser-hexagon.js';
-import * as utils from '../utils.js';
 import {ArtifactType} from '../../types/tool.interfaces.js';
+import {addArtifactToResult} from '../artifact-utils.js';
+import {BaseCompiler} from '../base-compiler.js';
+import {CompilationEnvironment} from '../compilation-env.js';
+import {LLVMOptInfo} from '../llvm-opt-transformer.js';
+import {AmdgpuAsmParser} from '../parsers/asm-parser-amdgpu.js';
+import {HexagonAsmParser} from '../parsers/asm-parser-hexagon.js';
+import {SassAsmParser} from '../parsers/asm-parser-sass.js';
+import {StackUsageInfo} from '../stack-usage-transformer.js';
+import * as utils from '../utils.js';
 
 const offloadRegexp = /^#\s+__CLANG_OFFLOAD_BUNDLE__(__START__|__END__)\s+(.*)$/gm;
 
@@ -49,8 +61,18 @@ export class ClangCompiler extends BaseCompiler {
         return 'clang';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
+        // Prefer the demangler bundled with this clang version.
+        // Still allows overriding from config (for bpf)
+        if (!info.demangler || info.demangler.includes('llvm-cxxfilt')) {
+            const demanglerPath = path.join(path.dirname(info.exe), 'llvm-cxxfilt');
+            if (fs.existsSync(demanglerPath)) {
+                info.demangler = demanglerPath;
+            }
+        }
+
         super(info, env);
+
         this.compiler.supportsDeviceAsmView = true;
 
         const asanSymbolizerPath = path.join(path.dirname(this.compiler.exe), 'llvm-symbolizer');
@@ -76,32 +98,46 @@ export class ClangCompiler extends BaseCompiler {
     }
 
     async addTimeTraceToResult(result: CompilationResult, dirPath: string, outputFilename: string) {
-        let timeTraceJson = '';
-        const outputExt = path.extname(outputFilename);
-        if (outputExt) {
-            timeTraceJson = outputFilename.replace(outputExt, '.json');
-        } else {
-            timeTraceJson += '.json';
+        const timeTraceJson = utils.changeExtension(outputFilename, '.json');
+        const alternativeFilename =
+            outputFilename + '-' + utils.changeExtension(path.basename(result.inputFilename || 'example.cpp'), '.json');
+
+        const mainFilepath = path.join(dirPath, timeTraceJson);
+        const alternativeJsonFilepath = path.join(dirPath, alternativeFilename);
+
+        let jsonFilepath = '';
+
+        if (await utils.fileExists(mainFilepath)) {
+            jsonFilepath = mainFilepath;
+        } else if (await utils.fileExists(alternativeJsonFilepath)) {
+            jsonFilepath = alternativeJsonFilepath;
         }
-        const jsonFilepath = path.join(dirPath, timeTraceJson);
-        if (await utils.fileExists(jsonFilepath)) {
-            this.addArtifactToResult(
-                result,
-                jsonFilepath,
-                ArtifactType.timetrace,
-                'Trace events JSON',
-                (buffer: Buffer) => {
-                    return buffer.toString('utf-8').startsWith('{"traceEvents":[');
-                },
-            );
+
+        if (jsonFilepath) {
+            addArtifactToResult(result, jsonFilepath, ArtifactType.timetrace, 'Trace events JSON', (buffer: Buffer) => {
+                return buffer.toString('utf8').startsWith('{"traceEvents":[');
+            });
         }
     }
 
-    override runExecutable(executable, executeParameters: ExecutableExecutionOptions, homeDir) {
+    override async afterBuild(key: CacheKey, dirPath: string, buildResult: BuildResult): Promise<BuildResult> {
+        const compilationInfo = this.getCompilationInfo(key, buildResult, dirPath);
+
+        const filename = path.basename(compilationInfo.outputFilename);
+        await this.addTimeTraceToResult(buildResult, dirPath, filename);
+
+        return super.afterBuild(key, dirPath, buildResult);
+    }
+
+    override runExecutable(executable: string, executeParameters: ExecutableExecutionOptions, homeDir: string) {
         if (this.asanSymbolizerPath) {
             executeParameters.env = {
                 ASAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
+                LSAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
                 MSAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
+                RTSAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
+                TSAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
+                UBSAN_SYMBOLIZER_PATH: this.asanSymbolizerPath,
                 ...executeParameters.env,
             };
         }
@@ -109,7 +145,7 @@ export class ClangCompiler extends BaseCompiler {
     }
 
     forceDwarf4UnlessOverridden(options: string[]) {
-        const hasOverride = _.any(options, option => {
+        const hasOverride = _.any(options, (option: string) => {
             return option.includes('-gdwarf-') || option.includes('-fdebug-default-version=');
         });
 
@@ -124,19 +160,47 @@ export class ClangCompiler extends BaseCompiler {
         return this.forceDwarf4UnlessOverridden(options);
     }
 
+    // Clang cross-compile with -stdlib=libc++ is currently (up to at least 18.1.0) broken:
+    // https://github.com/llvm/llvm-project/issues/57104
+    //
+    // Below is a workaround discussed in CE issue #5293. If the llvm issue is ever resolved it would be best
+    // to apply this only for clang versions up to the official resolution.
+    // To smoke-test such future versions, check locally *without* this filterUserOptions overload whether
+    // compiling `#include <string>` with flag `-stdlib=libc++` succeeds: https://godbolt.org/z/7dKrad7Wc
+
+    override filterUserOptions(userOptions: string[]): string[] {
+        if (
+            this.lang.id === 'c++' &&
+            !this.buildenvsetup?.compilerSupportsX86 && // cross-compilation
+            _.any(userOptions, option => {
+                return option === '-stdlib=libc++';
+            })
+        ) {
+            const addedIncludePath =
+                '-I' + path.join(path.dirname(this.compiler.exe), '../include/x86_64-unknown-linux-gnu/c++/v1/');
+            if (
+                !_.any(userOptions, option => {
+                    return option === addedIncludePath;
+                })
+            )
+                userOptions = userOptions.concat(addedIncludePath);
+        }
+        return userOptions;
+    }
+
     override async afterCompilation(
-        result,
-        doExecute,
-        key,
-        executeParameters,
-        tools,
-        backendOptions,
-        filters,
-        options,
-        optOutput,
-        stackUsageOutput,
+        result: CompilationResult,
+        doExecute: boolean,
+        key: CacheKey,
+        executeParameters: ExecutableExecutionOptions,
+        tools: ActiveTool[],
+        backendOptions: Record<string, any>,
+        filters: ParseFiltersAndOutputOptions,
+        options: string[],
+        optOutput: LLVMOptInfo[] | undefined,
+        stackUsageOutput: StackUsageInfo[] | undefined,
         bypassCache: BypassCache,
-        customBuildPath?,
+        customBuildPath?: string,
     ) {
         const compilationInfo = this.getCompilationInfo(key, result, customBuildPath);
 
@@ -164,7 +228,7 @@ export class ClangCompiler extends BaseCompiler {
         compiler: string,
         options: string[],
         inputFilename: string,
-        execOptions: ExecutionOptions & {env: Record<string, string>},
+        execOptions: ExecutionOptionsWithEnv,
     ) {
         if (!execOptions) {
             execOptions = this.getDefaultExecOptions();
@@ -175,38 +239,38 @@ export class ClangCompiler extends BaseCompiler {
         return await super.runCompiler(compiler, options, inputFilename, execOptions);
     }
 
-    async splitDeviceCode(assembly) {
+    async splitDeviceCode(assembly: string) {
         // Check to see if there is any offload code in the assembly file.
         if (!offloadRegexp.test(assembly)) return null;
 
         offloadRegexp.lastIndex = 0;
         const matches = assembly.matchAll(offloadRegexp);
         let prevStart = 0;
-        const devices = {};
+        const devices: Record<string, string> = {};
         for (const match of matches) {
             const [full, startOrEnd, triple] = match;
             if (startOrEnd === '__START__') {
                 prevStart = match.index + full.length + 1;
             } else {
-                devices[triple] = assembly.substr(prevStart, match.index - prevStart);
+                devices[triple] = assembly.substring(prevStart, match.index);
             }
         }
         return devices;
     }
 
-    override async extractDeviceCode(result, filters, compilationInfo) {
+    override async extractDeviceCode(result, filters: ParseFiltersAndOutputOptions, compilationInfo: CompilationInfo) {
         const split = await this.splitDeviceCode(result.asm);
         if (!split) return result;
 
-        const devices = (result.devices = {});
+        result.devices = {};
         for (const key of Object.keys(split)) {
             if (key.indexOf('host-') === 0) result.asm = split[key];
-            else devices[key] = await this.processDeviceAssembly(key, split[key], filters, compilationInfo);
+            else result.devices[key] = await this.processDeviceAssembly(key, split[key], filters, compilationInfo);
         }
         return result;
     }
 
-    async extractBitcodeFromBundle(bundlefile, devicename): Promise<string> {
+    async extractBitcodeFromBundle(bundlefile: string, devicename: string): Promise<string> {
         const bcfile = path.join(path.dirname(bundlefile), devicename + '.bc');
 
         const env = this.getDefaultExecOptions();
@@ -239,7 +303,7 @@ export class ClangCompiler extends BaseCompiler {
         }
     }
 
-    async processDeviceAssembly(deviceName, deviceAsm, filters, compilationInfo) {
+    async processDeviceAssembly(deviceName: string, deviceAsm: string, filters, compilationInfo: CompilationInfo) {
         if (deviceAsm.startsWith('BC')) {
             deviceAsm = await this.extractBitcodeFromBundle(compilationInfo.outputFilename, deviceName);
         }
@@ -255,13 +319,13 @@ export class ClangCudaCompiler extends ClangCompiler {
         return 'clang-cuda';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
 
         this.asm = new SassAsmParser();
     }
 
-    override getCompilerResultLanguageId() {
+    override getCompilerResultLanguageId(filters?: ParseFiltersAndOutputOptions): string | undefined {
         return 'ptx';
     }
 
@@ -269,7 +333,7 @@ export class ClangCudaCompiler extends ClangCompiler {
         return ['-o', this.filename(outputFilename), '-g1', filters.binary ? '-c' : '-S'];
     }
 
-    override async objdump(outputFilename, result, maxSize) {
+    override async objdump(outputFilename: string, result, maxSize: number) {
         // For nvdisasm.
         const args = [...this.compiler.objdumperArgs, outputFilename, '-c', '-g', '-hex'];
         const execOptions = {maxOutput: maxSize, customCwd: path.dirname(outputFilename)};
@@ -290,7 +354,7 @@ export class ClangHipCompiler extends ClangCompiler {
         return 'clang-hip';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
 
         this.asm = new AmdgpuAsmParser();
@@ -306,7 +370,7 @@ export class ClangIntelCompiler extends ClangCompiler {
         return 'clang-intel';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
 
         if (!this.offloadBundlerPath) {
@@ -317,16 +381,19 @@ export class ClangIntelCompiler extends ClangCompiler {
         }
     }
 
-    override getDefaultExecOptions(): ExecutionOptions & {env: Record<string, string>} {
+    override getDefaultExecOptions(): ExecutionOptionsWithEnv {
         const opts = super.getDefaultExecOptions();
         opts.env.PATH = process.env.PATH + path.delimiter + path.dirname(this.compiler.exe);
 
         return opts;
     }
 
-    override runExecutable(executable, executeParameters: ExecutableExecutionOptions, homeDir) {
+    override runExecutable(executable: string, executeParameters: ExecutableExecutionOptions, homeDir: string) {
+        const base = path.dirname(this.compiler.exe);
+        const ocl_pre2024 = path.resolve(`${base}/../lib/x64/libintelocl.so`);
+        const ocl_2024 = path.resolve(`${base}/../lib/libintelocl.so`);
         executeParameters.env = {
-            OCL_ICD_FILENAMES: path.resolve(path.dirname(this.compiler.exe) + '/../lib/x64/libintelocl.so'),
+            OCL_ICD_FILENAMES: `${ocl_2024}:${ocl_pre2024}`,
             ...executeParameters.env,
         };
         return super.runExecutable(executable, executeParameters, homeDir);
@@ -338,7 +405,7 @@ export class ClangHexagonCompiler extends ClangCompiler {
         return 'clang-hexagon';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
 
         this.asm = new HexagonAsmParser();
@@ -350,7 +417,7 @@ export class ClangDxcCompiler extends ClangCompiler {
         return 'clang-dxc';
     }
 
-    constructor(info: PreliminaryCompilerInfo, env) {
+    constructor(info: PreliminaryCompilerInfo, env: CompilationEnvironment) {
         super(info, env);
 
         this.compiler.supportsIntel = false;

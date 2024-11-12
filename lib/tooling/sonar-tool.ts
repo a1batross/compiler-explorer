@@ -24,6 +24,7 @@
 
 import path from 'path';
 
+import {CompilationInfo, ExecutionOptions} from '../../types/compilation/compilation.interfaces.js';
 import type {
     Fix,
     Link,
@@ -31,13 +32,12 @@ import type {
     ResultLine,
     ResultLineTag,
 } from '../../types/resultline/resultline.interfaces.js';
-import type {Artifact, ToolResult, ToolInfo} from '../../types/tool.interfaces.js';
+import type {Artifact, ToolInfo, ToolResult} from '../../types/tool.interfaces.js';
+import {OptionsHandlerLibrary} from '../options-handler.js';
 import * as utils from '../utils.js';
 
-import {BaseTool} from './base-tool.js';
 import {ToolEnv} from './base-tool.interface.js';
-import {ExecutionOptions} from '../../types/compilation/compilation.interfaces.js';
-import {Library} from '../../types/libraries/libraries.interfaces.js';
+import {BaseTool} from './base-tool.js';
 
 export class SonarTool extends BaseTool {
     reproducer?: Artifact;
@@ -180,7 +180,7 @@ export class SonarTool extends BaseTool {
     buildCompilationCMD(
         compilationInfo: Record<any, any>,
         inputFilePath: string,
-        supportedLibraries?: Record<string, Library>,
+        supportedLibraries?: Record<string, OptionsHandlerLibrary>,
     ) {
         const cmd: any[] = [];
         cmd.push(compilationInfo.compiler.exe);
@@ -207,11 +207,11 @@ export class SonarTool extends BaseTool {
     }
 
     override async runTool(
-        compilationInfo: Record<any, any>,
+        compilationInfo: CompilationInfo,
         inputFilePath?: string,
         args?: string[],
         stdin?: string,
-        supportedLibraries?: Record<string, Library>,
+        supportedLibraries?: Record<string, OptionsHandlerLibrary>,
     ): Promise<ToolResult> {
         if (inputFilePath == null) {
             return new Promise(resolve => {

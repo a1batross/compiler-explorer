@@ -22,13 +22,27 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-import {BypassCache} from './compilation/compilation.interfaces.js';
+import {
+    ActiveTool,
+    BypassCache,
+    CompilationResult,
+    ExecutionParams,
+    FiledataPair,
+} from './compilation/compilation.interfaces.js';
 import {AllCompilerOverrideOptions} from './compilation/compiler-overrides.interfaces.js';
 import {ICompilerArguments} from './compiler-arguments.interfaces.js';
+import {PossibleRuntimeTools} from './execution/execution.interfaces.js';
+import {ParseFiltersAndOutputOptions} from './features/filters.interfaces.js';
 import {InstructionSet} from './instructionsets.js';
 import {Language, LanguageKey} from './languages.interfaces.js';
-import {Library} from './libraries/libraries.interfaces.js';
+import {Library, SelectedLibraryVersion} from './libraries/libraries.interfaces.js';
 import {Tool, ToolInfo} from './tool.interfaces.js';
+
+export type Remote = {
+    target: string;
+    path: string;
+    cmakePath: string;
+};
 
 export type CompilerInfo = {
     id: string;
@@ -60,6 +74,7 @@ export type CompilerInfo = {
     adarts: string;
     supportsDeviceAsmView?: boolean;
     supportsDemangle?: boolean;
+    supportsVerboseDemangling?: boolean;
     supportsBinary?: boolean;
     supportsBinaryObject?: boolean;
     supportsIntel?: boolean;
@@ -69,11 +84,12 @@ export type CompilerInfo = {
     supportsGccDump?: boolean;
     supportsFiltersInBinary?: boolean;
     supportsOptOutput?: boolean;
+    supportsVerboseAsm?: boolean;
     supportsStackUsageOutput?: boolean;
     supportsPpView?: boolean;
     supportsAstView?: boolean;
     supportsIrView?: boolean;
-    supportsLLVMOptPipelineView?: boolean;
+    supportsClangirView?: boolean;
     supportsRustMirView?: boolean;
     supportsRustMacroExpView?: boolean;
     supportsRustHirView?: boolean;
@@ -110,20 +126,19 @@ export type CompilerInfo = {
     tools: Record<ToolInfo['id'], Tool>;
     unwiseOptions: string[];
     hidden: boolean;
-    buildenvsetup: {
+    buildenvsetup?: {
         id: string;
-        props: (name: string, def: string) => string;
+        props: (name: string, def?: any) => any;
     };
     license?: {
         link?: string;
         name?: string;
         preamble?: string;
+        invasive?: boolean;
     };
-    remote?: {
-        target: string;
-        path: string;
-    };
+    remote?: Remote;
     possibleOverrides?: AllCompilerOverrideOptions;
+    possibleRuntimeTools?: PossibleRuntimeTools;
     disabledFilters: string[];
     optArg?: string;
     stackUsageArg?: string;
@@ -131,9 +146,17 @@ export type CompilerInfo = {
     removeEmptyGccDump?: boolean;
     irArg?: string[];
     minIrArgs?: string[];
-    llvmOptArg?: string[];
-    llvmOptModuleScopeArg?: string[];
-    llvmOptNoDiscardValueNamesArg?: string[];
+    optPipeline?: {
+        groupName?: string;
+        supportedOptions?: string[];
+        supportedFilters?: string[];
+        arg?: string[];
+        moduleScopeArg?: string[];
+        noDiscardValueNamesArg?: string[];
+        monacoLanguage?: string;
+        initialOptionsState?: Record<string, boolean>;
+        initialFiltersState?: Record<string, boolean>;
+    };
     cachedPossibleArguments?: any;
     nvdisasm?: string;
     mtime?: any;
@@ -148,8 +171,18 @@ export type PreliminaryCompilerInfo = Omit<CompilerInfo, 'version' | 'fullVersio
 export interface ICompiler {
     possibleArguments: ICompilerArguments;
     lang: Language;
-    compile(source, options, backendOptions, filters, bypassCache, tools, executionParameters, libraries, files);
-    cmake(files, key, bypassCache: BypassCache);
-    initialise(mtime: Date, clientOptions, isPrediscovered: boolean);
+    compile(
+        source: string,
+        options: string[],
+        backendOptions: Record<string, any>,
+        filters: ParseFiltersAndOutputOptions,
+        bypassCache: BypassCache,
+        tools: ActiveTool[],
+        executeParameters: ExecutionParams,
+        libraries: SelectedLibraryVersion[],
+        files: FiledataPair[],
+    ): Promise<any>;
+    cmake(files: FiledataPair[], key, bypassCache: BypassCache): Promise<CompilationResult>;
+    initialise(mtime: Date, clientOptions, isPrediscovered: boolean): Promise<ICompiler | null>;
     getInfo(): CompilerInfo;
 }

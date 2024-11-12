@@ -39,8 +39,7 @@ import * as monacoConfig from '../monaco-config.js';
 
 import {GccDumpFiltersState, GccDumpViewState, GccDumpViewSelectedPass} from './gccdump-view.interfaces.js';
 
-import {ga} from '../analytics.js';
-import {assert} from '../assert.js';
+import {unwrap, assert} from '../assert.js';
 import {CompilationResult} from '../compilation/compilation.interfaces.js';
 import {CompilerInfo} from '../compiler.interfaces.js';
 
@@ -55,6 +54,8 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
     dumpRtlTitle: string;
     dumpIpaButton: JQuery<HTMLElement>;
     dumpIpaTitle: string;
+    optionGimpleFeButton: JQuery<HTMLElement>;
+    optionGimpleFeTitle: string;
     optionAddressButton: JQuery<HTMLElement>;
     optionAddressTitle: string;
     optionSlimButton: JQuery<HTMLElement>;
@@ -96,8 +97,8 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
             if (match) {
                 const selectedPassO: GccDumpViewSelectedPass = {
                     filename_suffix: match[1] + '.' + match[2],
-                    name: match[2] + ' (' + passType[match[1]] + ')',
-                    command_prefix: '-fdump-' + passType[match[1]] + '-' + match[2],
+                    name: match[2] + ' (' + passType[match[1] as keyof typeof passType] + ')',
+                    command_prefix: '-fdump-' + passType[match[1] as keyof typeof passType] + '-' + match[2],
 
                     // FIXME(dkm): maybe this could be avoided by better typing.
                     selectedPass: null,
@@ -136,8 +137,8 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         return $('#gccdump').html();
     }
 
-    override createEditor(editorRoot: HTMLElement): monaco.editor.IStandaloneCodeEditor {
-        return monaco.editor.create(
+    override createEditor(editorRoot: HTMLElement): void {
+        this.editor = monaco.editor.create(
             editorRoot,
             monacoConfig.extendConfig({
                 readOnly: true,
@@ -154,14 +155,6 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
 
     override getDefaultPaneName() {
         return 'GCC Tree/RTL Viewer';
-    }
-
-    override registerOpeningAnalyticsEvent() {
-        ga.proxy('send', {
-            hitType: 'event',
-            eventCategory: 'OpenViewPane',
-            eventAction: 'GccDump',
-        });
     }
 
     override registerButtons(state: GccDumpViewState & MonacoPaneState) {
@@ -195,6 +188,9 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
 
         this.dumpIpaButton = this.domRoot.find("[data-bind='ipaDump']");
         this.dumpIpaTitle = this.dumpIpaButton.prop('title');
+
+        this.optionGimpleFeButton = this.domRoot.find("[data-bind='gimpleFe']");
+        this.optionGimpleFeTitle = this.optionGimpleFeButton.prop('title');
 
         this.optionAddressButton = this.domRoot.find("[data-bind='addressOption']");
         this.optionAddressTitle = this.optionAddressButton.prop('title');
@@ -230,7 +226,23 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
     override registerCallbacks() {
         this.filters.on('change', this.onFilterChange.bind(this));
         this.selectize.on('change', this.onPassSelect.bind(this));
+        this.selectize.on('dropdown_open', () => {
+            // Prevent overflowing the window
+            const dropdown = this.selectize.dropdown_content;
+            dropdown.style.maxHeight = `${window.innerHeight - dropdown.getBoundingClientRect().top - 10}px`;
+        });
+        this.selectize.on('dropdown_close', () => {
+            // scroll back to the selection on the next open
+            if (!this.selectedPass) return;
 
+            // Make the trip back from the stored selectedPass to the TomSelect option
+            const activeOption = Object.entries(this.selectize.options).find(
+                op => op[1].filename_suffix === this.selectedPass,
+            );
+            const selectedPassId = unwrap(activeOption)[0];
+            const option = this.selectize.getOption(selectedPassId);
+            this.selectize.setActiveOption(option);
+        });
         this.eventHub.emit('gccDumpViewOpened', this.compilerInfo.compilerId);
         this.eventHub.emit('requestSettings');
 
@@ -244,11 +256,12 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
     }
 
     updateButtons() {
-        const formatButtonTitle = (button, title) =>
+        const formatButtonTitle = (button: JQuery<HTMLElement>, title: string) =>
             button.prop('title', '[' + (button.hasClass('active') ? 'ON' : 'OFF') + '] ' + title);
         formatButtonTitle(this.dumpTreesButton, this.dumpTreesTitle);
         formatButtonTitle(this.dumpRtlButton, this.dumpRtlTitle);
         formatButtonTitle(this.dumpIpaButton, this.dumpIpaTitle);
+        formatButtonTitle(this.optionGimpleFeButton, this.optionGimpleFeTitle);
         formatButtonTitle(this.optionAddressButton, this.optionAddressTitle);
         formatButtonTitle(this.optionSlimButton, this.optionSlimTitle);
         formatButtonTitle(this.optionRawButton, this.optionRawTitle);
@@ -297,7 +310,7 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
 
     // Called after result from new compilation received
     // if gccDumpOutput is false, cleans the select menu
-    updatePass(filters, selectize, gccDumpOutput) {
+    updatePass(filters: Toggles, selectize: TomSelect, gccDumpOutput) {
         const passes = gccDumpOutput ? gccDumpOutput.all : [];
 
         // we are changing selectize but don't want any callback to
@@ -305,16 +318,15 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         this.inhibitPassSelect = true;
 
         selectize.clear(true);
-        selectize.clearOptions();
 
         for (const p of passes) {
             selectize.addOption(p);
         }
 
-        if (gccDumpOutput.selectedPass) selectize.addItem(gccDumpOutput.selectedPass.name, true);
-        else selectize.clear(true);
-
-        this.eventHub.emit('gccDumpPassSelected', this.compilerInfo.compilerId, gccDumpOutput.selectedPass, false);
+        if (gccDumpOutput && gccDumpOutput.selectedPass) {
+            selectize.addItem(gccDumpOutput.selectedPass.name, true);
+            this.eventHub.emit('gccDumpPassSelected', this.compilerInfo.compilerId, gccDumpOutput.selectedPass, false);
+        } else selectize.clear(true);
 
         this.inhibitPassSelect = false;
     }
@@ -350,7 +362,7 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         } else {
             this.selectize.clear(true);
             this.selectedPass = null;
-            this.updatePass(this.filters, this.selectize, false);
+            this.updatePass(this.filters, this.selectize, null);
             this.uiIsReady = false;
             this.onUiNotReady();
             if (!compiler.supportsGccDump) {
@@ -362,7 +374,7 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         this.updateState();
     }
 
-    showGccDumpResults(results) {
+    showGccDumpResults(results: string) {
         this.editor.setValue(results);
 
         if (!this.isAwaitingInitialResults) {
@@ -374,7 +386,13 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         }
     }
 
-    override onCompiler(compilerId: number, compiler, options: unknown, editorId: number, treeId: number) {
+    override onCompiler(
+        compilerId: number,
+        compiler: CompilerInfo | null,
+        options: unknown,
+        editorId: number,
+        treeId: number,
+    ) {
         if (compilerId === this.compilerInfo.compilerId) {
             this.compilerInfo.compilerName = compiler ? compiler.name : '';
             this.compilerInfo.editorId = editorId;
@@ -385,12 +403,12 @@ export class GccDump extends MonacoPane<monaco.editor.IStandaloneCodeEditor, Gcc
         }
     }
 
-    override onCompilerClose(id) {
+    override onCompilerClose(id: number) {
         if (id === this.compilerInfo.compilerId) {
             // We can't immediately close as an outer loop somewhere in GoldenLayout is iterating over
             // the hierarchy. We can't modify while it's being iterated over.
             this.close();
-            _.defer(function (self) {
+            _.defer(function (self: GccDump) {
                 self.container.close();
             }, this);
         }
